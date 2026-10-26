@@ -1,0 +1,30 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: crosscheck doctor
+      description: Output of `crosscheck doctor` (it contains no secrets).
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Run details
+      description: The outcome line and relevant parts of `report.md` or `harness.log` from `.crosscheck/runs/<id>/`. Remove anything private from your repository first.
+      render: text
+  - type: input
+    id: install
+    attributes:
+      label: Installed via
+      placeholder: Homebrew, release binary, or from source (commit)

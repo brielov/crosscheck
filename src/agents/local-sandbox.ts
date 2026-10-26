@@ -13,17 +13,21 @@ import { spawnProcess } from "./process.ts";
 
 const PNPM_VERSION = "10.34.9";
 
-/** The adapters bootstrap their bridge with `pnpm install`; provide pnpm via bun if it is not installed. */
-async function shimDir(): Promise<string | undefined> {
+/**
+ * The adapters bootstrap their bridge with `pnpm install`; provide pnpm via
+ * bun if it is not installed. In a compiled crosscheck binary, execPath is the
+ * binary itself, and BUN_BE_BUN=1 makes it act as the bun CLI.
+ */
+export async function shimDir(): Promise<string | undefined> {
   if (Bun.which("pnpm")) return undefined;
   const dir = path.join(os.homedir(), ".cache", "crosscheck", "shims");
   const shim = path.join(dir, "pnpm");
-  if (!(await Bun.file(shim).exists())) {
+  const content = `#!/usr/bin/env bash\nBUN_BE_BUN=1 exec '${process.execPath.replaceAll("'", "'\\''")}' x pnpm@${PNPM_VERSION} "$@"\n`;
+  // Rewrite when stale: execPath differs between `bun src/cli.ts` and a binary.
+  const existing = Bun.file(shim);
+  if (!(await existing.exists()) || (await existing.text()) !== content) {
     await mkdir(dir, { recursive: true });
-    await Bun.write(
-      shim,
-      `#!/usr/bin/env bash\nexec '${process.execPath.replaceAll("'", "'\\''")}' x pnpm@${PNPM_VERSION} "$@"\n`,
-    );
+    await Bun.write(shim, content);
     await chmod(shim, 0o755);
   }
   return dir;

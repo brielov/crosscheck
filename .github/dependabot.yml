@@ -1,0 +1,8 @@
+# GitHub Actions only. npm dependencies are pinned on purpose: the experimental
+# harness adapters must be upgraded deliberately (see docs/development.md).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

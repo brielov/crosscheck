@@ -6,6 +6,8 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import { createHarnessBackend, defaultCodexConfig } from "./agents/harness-backend.ts";
 import { createRepoTools } from "./agents/repo-tools.ts";
+import { doctor } from "./doctor.ts";
+import pkg from "../package.json";
 import { Ledger, type Finding } from "./findings.ts";
 import { runReview, type RunState } from "./orchestrator.ts";
 import { bold, createProgress, cyan, dim, green, red, yellow } from "./progress.ts";
@@ -21,7 +23,7 @@ import {
   type RunConfig,
 } from "./types.ts";
 
-const VERSION = "0.1.0";
+const VERSION = pkg.version;
 const DEFAULT_FOCUS: FocusArea[] = ["architecture", "security", "correctness"];
 const DEFAULTS = { rounds: 3, timeoutMinutes: 60, author: "claude-code", reviewer: "codex" };
 
@@ -40,6 +42,7 @@ Usage:
   crosscheck                         Interactive mode
   crosscheck plan <PLAN.md> [options]
   crosscheck plan --brief "<text>" [options]
+  crosscheck doctor [--json]         Check this machine's setup (no agents started)
 
 Input (one of):
   <PLAN.md>                    Existing Markdown plan (never modified)
@@ -423,6 +426,7 @@ function captureHarnessLogs(file: string, show: ((line: string) => void) | undef
 }
 
 async function main(argv: string[]): Promise<number> {
+  if (argv[0] === "doctor") return doctor(argv.slice(1));
   let parsed: Awaited<ReturnType<typeof parseCli>>;
   try {
     parsed = await parseCli(argv);

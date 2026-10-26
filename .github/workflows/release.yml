@@ -1,0 +1,127 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  BUN_VERSION: "1.4.4"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Tag matches package.json
+        run: |
+          version=$(bun -p 'require("./package.json").version')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $version"
+            exit 1
+          fi
+      - name: Changelog has an entry
+        run: grep -q "^## \[${GITHUB_REF_NAME#v}\]" CHANGELOG.md || { echo "::error::CHANGELOG.md has no section for ${GITHUB_REF_NAME#v}"; exit 1; }
+      - run: bun install --frozen-lockfile
+      - run: bun check
+      - run: bun run lint
+      - run: bun test
+        env:
+          GIT_AUTHOR_NAME: ci
+          GIT_AUTHOR_EMAIL: ci@example.com
+          GIT_COMMITTER_NAME: ci
+          GIT_COMMITTER_EMAIL: ci@example.com
+
+  build:
+    needs: verify
+    name: Build ${{ matrix.platform }}
+    strategy:
+      matrix:
+        include:
+          - { platform: linux-x64, target: bun-linux-x64, os: ubuntu-latest }
+          - { platform: linux-arm64, target: bun-linux-arm64, os: ubuntu-24.04-arm }
+          - { platform: darwin-arm64, target: bun-darwin-arm64, os: macos-latest }
+          # Cross-compiled on Apple silicon; smoke-tested under Rosetta when available.
+          - { platform: darwin-x64, target: bun-darwin-x64, os: macos-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - run: bun scripts/build.ts ${{ matrix.target }}
+      - name: Sign (ad hoc)
+        if: runner.os == 'macOS'
+        run: codesign --force --sign - dist/${{ matrix.platform }}/crosscheck
+      - name: Smoke test
+        run: |
+          bin=dist/${{ matrix.platform }}/crosscheck
+          run="$bin"
+          if [ "${{ matrix.platform }}" = darwin-x64 ]; then
+            if arch -x86_64 /usr/bin/true 2>/dev/null; then
+              run="arch -x86_64 $bin"
+            else
+              echo "::warning::Rosetta is not available; skipping the darwin-x64 smoke test"
+              exit 0
+            fi
+          fi
+          $run --version
+          $run doctor --json > doctor.json || true
+          bun scripts/assert-doctor.ts doctor.json
+      - name: Package
+        run: |
+          name="crosscheck-${GITHUB_REF_NAME#v}-${{ matrix.platform }}"
+          mkdir -p "out/$name"
+          cp "dist/${{ matrix.platform }}/crosscheck" LICENSE README.md "out/$name/"
+          tar -C out -czf "$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.platform }}
+          path: crosscheck-*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd artifacts
+          sha256sum crosscheck-*.tar.gz > checksums.txt
+          cat checksums.txt
+      - name: Release notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            /^## \[/ { p = index($0, "[" v "]") > 0; next }
+            /^\[[^]]+\]: / { p = 0 }
+            p
+          ' CHANGELOG.md > notes.md
+          cat >> notes.md <<NOTES
+
+          ## Install
+
+          \`\`\`sh
+          brew install brielov/tap/crosscheck
+          \`\`\`
+
+          Or download the archive for your platform below, verify it against \`checksums.txt\`, and put \`crosscheck\` on your PATH. Requires Node.js 20+ and git; run \`crosscheck doctor\` to check your setup.
+          NOTES
+          cat notes.md
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" artifacts/* --title "crosscheck ${GITHUB_REF_NAME#v}" --notes-file notes.md --verify-tag

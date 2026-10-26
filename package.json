@@ -1,7 +1,27 @@
 {
   "name": "crosscheck",
   "version": "0.1.0",
-  "description": "Author/reviewer plan review with Claude Code and Codex agents",
+  "description": "Have two coding agents review a plan against your actual repository: Claude Code writes, Codex reviews (or the other way round).",
+  "keywords": [
+    "cli",
+    "code-review",
+    "planning",
+    "ai-agents",
+    "claude-code",
+    "codex",
+    "ai-sdk",
+    "bun"
+  ],
+  "homepage": "https://github.com/brielov/crosscheck#readme",
+  "bugs": {
+    "url": "https://github.com/brielov/crosscheck/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/brielov/crosscheck.git"
+  },
+  "license": "MIT",
+  "author": "Gabriel Vaquer",
   "module": "src/cli.ts",
   "type": "module",
   "private": true,
@@ -12,8 +32,9 @@
     "crosscheck": "bun src/cli.ts",
     "test": "bun test",
     "typecheck": "bun check",
-    "lint": "oxlint src test spike",
-    "fmt": "oxfmt src test spike"
+    "lint": "oxlint src test spike scripts",
+    "fmt": "oxfmt src test spike scripts",
+    "build": "bun scripts/build.ts"
   },
   "engines": {
     "bun": ">=1.3"
