@@ -1,0 +1,136 @@
+import type { HarnessV1NetworkSandboxSession } from "@ai-sdk/harness";
+import { chmod, mkdir } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
+// The Claude Code and Codex harness adapters run a WebSocket bridge "inside a
+// sandbox" and the only published network sandbox is Vercel Sandbox (remote).
+// This host-backed session lets the same adapters run on this machine against
+// the local repository. It provides NO isolation of its own: crosscheck
+// disables the agents' built-in shell/file tools and gives them read-only host
+// tools instead (see repo-tools.ts).
+
+const PNPM_VERSION = "10.34.9";
+
+/** The adapters bootstrap their bridge with `pnpm install`; provide pnpm via bun if it is not installed. */
+async function shimDir(): Promise<string | undefined> {
+  if (Bun.which("pnpm")) return undefined;
+  const dir = path.join(os.homedir(), ".cache", "crosscheck", "shims");
+  const shim = path.join(dir, "pnpm");
+  if (!(await Bun.file(shim).exists())) {
+    await mkdir(dir, { recursive: true });
+    await Bun.write(
+      shim,
+      `#!/usr/bin/env bash\nexec ${JSON.stringify(process.execPath)} x pnpm@${PNPM_VERSION} "$@"\n`,
+    );
+    await chmod(shim, 0o755);
+  }
+  return dir;
+}
+
+export async function freePort(): Promise<number> {
+  const server = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+  const { port } = server;
+  server.stop(true);
+  return port;
+}
+
+export async function createLocalNetworkSandboxSession(opts: {
+  workDir: string;
+  port: number;
+}): Promise<HarnessV1NetworkSandboxSession> {
+  const extraPath = await shimDir();
+  const procs = new Set<ReturnType<typeof Bun.spawn>>();
+  const resolve = (p: string) => (path.isAbsolute(p) ? p : path.join(opts.workDir, p));
+  const killGroup = (p: ReturnType<typeof Bun.spawn>, signal: NodeJS.Signals = "SIGTERM") => {
+    // Children run in their own process group so the bridge and the agent CLI
+    // it starts are terminated together.
+    try {
+      process.kill(-p.pid, signal);
+    } catch {
+      p.kill(signal);
+    }
+  };
+
+  const spawn: HarnessV1NetworkSandboxSession["spawn"] = async (o) => {
+    const p = Bun.spawn(["bash", "-c", o.command], {
+      cwd: o.workingDirectory ? resolve(o.workingDirectory) : opts.workDir,
+      env: {
+        ...process.env,
+        ...(extraPath ? { PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ""}` } : {}),
+        ...o.env,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+      stdin: "ignore",
+      detached: true,
+    });
+    procs.add(p);
+    o.abortSignal?.addEventListener("abort", () => killGroup(p), { once: true });
+    void p.exited.then(() => procs.delete(p));
+    return {
+      pid: p.pid,
+      stdout: p.stdout,
+      stderr: p.stderr,
+      wait: async () => ({ exitCode: await p.exited }),
+      kill: async () => killGroup(p),
+    };
+  };
+
+  const write = async (p: string, content: Uint8Array) => {
+    await mkdir(path.dirname(resolve(p)), { recursive: true });
+    await Bun.write(resolve(p), content);
+  };
+
+  const session: HarnessV1NetworkSandboxSession = {
+    id: `local-${process.pid}-${opts.port}`,
+    description: `Local host process; working directory ${opts.workDir}`,
+    defaultWorkingDirectory: opts.workDir,
+    ports: [opts.port],
+    getPortEndpoint: async ({ port, protocol }) => ({
+      url: `${protocol === "ws" ? "ws" : "http"}://127.0.0.1:${port}`,
+    }),
+    getPortUrl: async ({ port, protocol }) =>
+      `${protocol === "ws" ? "ws" : "http"}://127.0.0.1:${port}`,
+    readFile: async ({ path: p }) => {
+      const f = Bun.file(resolve(p));
+      return (await f.exists()) ? f.stream() : null;
+    },
+    readBinaryFile: async ({ path: p }) => {
+      const f = Bun.file(resolve(p));
+      return (await f.exists()) ? new Uint8Array(await f.arrayBuffer()) : null;
+    },
+    readTextFile: async ({ path: p, startLine, endLine }) => {
+      const f = Bun.file(resolve(p));
+      if (!(await f.exists())) return null;
+      const text = await f.text();
+      if (startLine == null && endLine == null) return text;
+      return text
+        .split("\n")
+        .slice((startLine ?? 1) - 1, endLine)
+        .join("\n");
+    },
+    writeFile: async ({ path: p, content }) => write(p, await new Response(content).bytes()),
+    writeBinaryFile: ({ path: p, content }) => write(p, content),
+    writeTextFile: ({ path: p, content }) => write(p, new TextEncoder().encode(content)),
+    spawn,
+    run: async (o) => {
+      const p = await spawn(o);
+      const [stdout, stderr, { exitCode }] = await Promise.all([
+        new Response(p.stdout).text(),
+        new Response(p.stderr).text(),
+        p.wait(),
+      ]);
+      return { exitCode, stdout, stderr };
+    },
+    stop: async () => {
+      for (const p of procs) killGroup(p);
+      await Promise.race([Promise.all([...procs].map((p) => p.exited)), Bun.sleep(3000)]);
+      for (const p of procs) killGroup(p, "SIGKILL");
+      procs.clear();
+    },
+    destroy: () => session.stop(),
+    restricted: () => session,
+  };
+  return session;
+}
