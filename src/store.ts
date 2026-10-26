@@ -7,6 +7,7 @@ import path from "node:path";
  * everything completed so far.
  */
 export class RunStore {
+  #pendingAppend: Promise<void> = Promise.resolve();
   private constructor(
     readonly id: string,
     readonly dir: string,
@@ -17,6 +18,8 @@ export class RunStore {
     const dir = path.join(base, "runs", id);
     await mkdir(path.join(dir, "plan"), { recursive: true });
     await mkdir(path.join(dir, "input"), { recursive: true });
+    await appendFile(path.join(dir, "events.jsonl"), "");
+    await appendFile(path.join(dir, "transcript.jsonl"), "");
     // Keep run artifacts out of the user's git status without touching their .gitignore.
     const ignore = path.join(base, ".gitignore");
     if (!(await Bun.file(ignore).exists())) await Bun.write(ignore, "*\n");
@@ -40,14 +43,17 @@ export class RunStore {
     return this.writeText(rel, `${JSON.stringify(data, null, 2)}\n`);
   }
 
-  async append(
-    rel: "events.jsonl" | "transcript.jsonl",
-    record: Record<string, unknown>,
-  ): Promise<void> {
-    await appendFile(
-      this.path(rel),
-      `${JSON.stringify({ at: new Date().toISOString(), ...record })}\n`,
-    );
+  append(rel: "events.jsonl" | "transcript.jsonl", record: Record<string, unknown>): Promise<void> {
+    const line = `${JSON.stringify({ at: new Date().toISOString(), ...record })}\n`;
+    this.#pendingAppend = this.#pendingAppend.then(() => appendFile(this.path(rel), line));
+    // Event callbacks cannot await writes. Retain failures for flush() without
+    // creating unhandled rejections while an agent is still streaming.
+    void this.#pendingAppend.catch(() => {});
+    return this.#pendingAppend;
+  }
+
+  flush(): Promise<void> {
+    return this.#pendingAppend;
   }
 
   /** Save plan version N; also refreshes plan.md (the latest version). */

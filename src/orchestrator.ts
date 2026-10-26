@@ -36,6 +36,9 @@ import {
 export const MAX_CORRECTIONS = 1;
 /** Consecutive rounds without any change in the plan or finding statuses before a run counts as stalled. */
 export const STALL_ROUNDS = 2;
+/** Streamed agent text is written to the transcript in chunks of this size or age. */
+const TEXT_FLUSH_CHARS = 2_000;
+const TEXT_FLUSH_MS = 1_000;
 
 export type RunEvent =
   | { type: "phase"; round: number; phase: string; agent: string | null }
@@ -195,8 +198,8 @@ export async function runReview(deps: RunDeps): Promise<RunState> {
     await store.writeJson("run.json", state);
     await store.writeJson("findings.json", ledger.toJSON());
   };
-  const backend = deps.createBackend({
-    onCheck: (r) => {
+  const backendHooks = {
+    onCheck: (r: { command: string; exitCode: number | null; output: string }) => {
       const check: CheckResult = {
         ...r,
         passed: r.exitCode === 0,
@@ -206,7 +209,8 @@ export async function runReview(deps: RunDeps): Promise<RunState> {
       state.checks.push(check);
       void store.append("events.jsonl", { type: "check", ...check });
     },
-  });
+  };
+  let backend: AgentBackend;
   const sessions: Partial<Record<Role, AgentSession>> = {};
   const roundLog = (round: number): RoundLog => {
     let log = state.rounds.find((r) => r.round === round);
@@ -231,7 +235,27 @@ export async function runReview(deps: RunDeps): Promise<RunState> {
     });
   };
 
+  // Streamed text is batched so the transcript holds readable chunks rather
+  // than one line per token; partial text still survives an interruption.
+  const pendingText: Record<Role, string> = { author: "", reviewer: "" };
+  const textTimers: Partial<Record<Role, ReturnType<typeof setTimeout>>> = {};
+  const flushText = (role: Role) => {
+    clearTimeout(textTimers[role]);
+    textTimers[role] = undefined;
+    if (!pendingText[role]) return;
+    const delta = pendingText[role];
+    pendingText[role] = "";
+    void store.append("transcript.jsonl", {
+      type: "activity",
+      role,
+      agent: labels[role],
+      round: state.round,
+      activity: { kind: "text", delta },
+    });
+  };
+
   async function session(role: Role): Promise<AgentSession> {
+    signal.throwIfAborted();
     const existing = sessions[role];
     if (existing) return existing;
     const created = await backend.openSession({
@@ -243,7 +267,22 @@ export async function runReview(deps: RunDeps): Promise<RunState> {
           ? prompts.authorInstructions(config)
           : prompts.reviewerInstructions(config),
       schema: role === "author" ? authorOutputSchema : reviewerOutputSchema,
+      signal,
       onActivity: (activity) => {
+        if (activity.kind === "text") {
+          pendingText[role] += activity.delta;
+          if (pendingText[role].length >= TEXT_FLUSH_CHARS) flushText(role);
+          else textTimers[role] ??= setTimeout(() => flushText(role), TEXT_FLUSH_MS);
+        } else {
+          flushText(role);
+          void store.append("transcript.jsonl", {
+            type: "activity",
+            role,
+            agent: labels[role],
+            round: state.round,
+            activity,
+          });
+        }
         emit({ type: "activity", agent: labels[role], activity });
         if (activity.kind === "tool-call")
           void store.append("events.jsonl", {
@@ -282,14 +321,40 @@ export async function runReview(deps: RunDeps): Promise<RunState> {
     for (let attempt = 0; attempt <= MAX_CORRECTIONS; attempt++) {
       signal.throwIfAborted();
       const turnPrompt = attempt === 0 ? prompt : prompts.correctionPrompt(errors);
-      const turn: TurnResult = await s.send(turnPrompt, signal);
+      await store.append("transcript.jsonl", {
+        type: "turn-start",
+        role,
+        agent: labels[role],
+        round: state.round,
+        attempt,
+        prompt: turnPrompt,
+      });
+      let turn: TurnResult;
+      try {
+        turn = await s.send(turnPrompt, signal);
+        signal.throwIfAborted();
+      } catch (e) {
+        flushText(role);
+        await store.append("transcript.jsonl", {
+          type: "turn-error",
+          role,
+          agent: labels[role],
+          round: state.round,
+          attempt,
+          error: e instanceof Error ? e.message : String(e),
+        });
+        throw e;
+      }
       const usage = state.usage[role];
       usage.turns += 1;
       for (const key of ["inputTokens", "outputTokens", "cachedInputTokens", "costUsd"] as const) {
         if (turn.usage[key] != null) usage[key] = (usage[key] ?? 0) + turn.usage[key];
       }
-      toolCalls += turn.toolCalls.filter((c) => c.ok).length;
+      toolCalls += turn.toolCalls.filter(
+        (c) => c.ok && ["read_file", "list_files", "search", "git"].includes(c.name),
+      ).length;
       for (const c of turn.toolCalls) {
+        if (!c.ok) continue;
         const d = describeTool(c);
         if (!state.examined[role].includes(d)) state.examined[role].push(d);
       }
@@ -305,7 +370,9 @@ export async function runReview(deps: RunDeps): Promise<RunState> {
           errors = parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`);
         }
       }
+      flushText(role);
       await store.append("transcript.jsonl", {
+        type: "turn-complete",
         role,
         agent: labels[role],
         round: state.round,
@@ -464,6 +531,7 @@ export async function runReview(deps: RunDeps): Promise<RunState> {
 
   let before: string | null = null;
   try {
+    backend = deps.createBackend(backendHooks);
     state.repo = await repoIdentity(config.repo);
     before = await workingTreeSnapshot(config.repo);
     await store.writeJson("input/config.json", config);
@@ -475,6 +543,7 @@ export async function runReview(deps: RunDeps): Promise<RunState> {
 
     if (config.input.kind === "plan") {
       const original = await Bun.file(config.input.planPath).text();
+      if (!original.trim()) throw new Error("plan file is empty");
       await store.writeText("input/plan.original.md", original);
       await savePlan(original, "user", "original plan supplied by the user");
     } else {
@@ -495,6 +564,7 @@ export async function runReview(deps: RunDeps): Promise<RunState> {
     let cycleDone = false;
     let unchangedRounds = 0;
     for (;;) {
+      signal.throwIfAborted();
       const decision = evaluate(ledger, { newMaterial, failedChecks: failedChecks() });
       if (decision) {
         finish(decision.outcome, decision.reason);
@@ -587,8 +657,19 @@ export async function runReview(deps: RunDeps): Promise<RunState> {
       state.repoModified = after != null && after !== before;
     }
     state.endedAt = new Date().toISOString();
-    await persist().catch(() => {});
-    await store.writeText("report.md", renderReport(state, ledger.list())).catch(() => {});
+    try {
+      flushText("author");
+      flushText("reviewer");
+      await store.flush();
+      await persist();
+      await store.writeText("report.md", renderReport(state, ledger.list()));
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      finish("error", `could not save run artifacts: ${message}`);
+      state.error = { message };
+      await persist().catch(() => {});
+      await store.writeText("report.md", renderReport(state, ledger.list())).catch(() => {});
+    }
   }
   return state;
 }

@@ -2,6 +2,7 @@ import type { HarnessV1NetworkSandboxSession } from "@ai-sdk/harness";
 import { chmod, mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { spawnProcess } from "./process.ts";
 
 // The Claude Code and Codex harness adapters run a WebSocket bridge "inside a
 // sandbox" and the only published network sandbox is Vercel Sandbox (remote).
@@ -21,7 +22,7 @@ async function shimDir(): Promise<string | undefined> {
     await mkdir(dir, { recursive: true });
     await Bun.write(
       shim,
-      `#!/usr/bin/env bash\nexec ${JSON.stringify(process.execPath)} x pnpm@${PNPM_VERSION} "$@"\n`,
+      `#!/usr/bin/env bash\nexec '${process.execPath.replaceAll("'", "'\\''")}' x pnpm@${PNPM_VERSION} "$@"\n`,
     );
     await chmod(shim, 0o755);
   }
@@ -38,42 +39,33 @@ export async function freePort(): Promise<number> {
 export async function createLocalNetworkSandboxSession(opts: {
   workDir: string;
   port: number;
+  env?: Record<string, string>;
 }): Promise<HarnessV1NetworkSandboxSession> {
   const extraPath = await shimDir();
-  const procs = new Set<ReturnType<typeof Bun.spawn>>();
+  const procs = new Set<ReturnType<typeof spawnProcess>>();
+  let stopped = false;
   const resolve = (p: string) => (path.isAbsolute(p) ? p : path.join(opts.workDir, p));
-  const killGroup = (p: ReturnType<typeof Bun.spawn>, signal: NodeJS.Signals = "SIGTERM") => {
-    // Children run in their own process group so the bridge and the agent CLI
-    // it starts are terminated together.
-    try {
-      process.kill(-p.pid, signal);
-    } catch {
-      p.kill(signal);
-    }
-  };
-
   const spawn: HarnessV1NetworkSandboxSession["spawn"] = async (o) => {
-    const p = Bun.spawn(["bash", "-c", o.command], {
+    if (stopped) throw new Error("Local session has stopped");
+    const managed = spawnProcess(["bash", "-c", o.command], {
       cwd: o.workingDirectory ? resolve(o.workingDirectory) : opts.workDir,
       env: {
         ...process.env,
         ...(extraPath ? { PATH: `${extraPath}${path.delimiter}${process.env.PATH ?? ""}` } : {}),
         ...o.env,
+        ...opts.env,
       },
-      stdout: "pipe",
-      stderr: "pipe",
-      stdin: "ignore",
-      detached: true,
+      signal: o.abortSignal,
     });
-    procs.add(p);
-    o.abortSignal?.addEventListener("abort", () => killGroup(p), { once: true });
-    void p.exited.then(() => procs.delete(p));
+    const p = managed.proc;
+    procs.add(managed);
+    void managed.exited.then(() => procs.delete(managed));
     return {
       pid: p.pid,
       stdout: p.stdout,
       stderr: p.stderr,
-      wait: async () => ({ exitCode: await p.exited }),
-      kill: async () => killGroup(p),
+      wait: async () => ({ exitCode: await managed.exited }),
+      kill: async () => managed.stop(),
     };
   };
 
@@ -124,9 +116,9 @@ export async function createLocalNetworkSandboxSession(opts: {
       return { exitCode, stdout, stderr };
     },
     stop: async () => {
-      for (const p of procs) killGroup(p);
-      await Promise.race([Promise.all([...procs].map((p) => p.exited)), Bun.sleep(3000)]);
-      for (const p of procs) killGroup(p, "SIGKILL");
+      stopped = true;
+      for (const p of procs) p.stop();
+      await Promise.all([...procs].map((p) => p.exited));
       procs.clear();
     },
     destroy: () => session.stop(),

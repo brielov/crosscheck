@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type {
@@ -128,12 +128,20 @@ export function response(
   };
 }
 
+const tempRepos: string[] = [];
+
 export async function tempRepo(): Promise<{ repo: string; planPath: string }> {
   const repo = await mkdtemp(path.join(os.tmpdir(), "crosscheck-test-"));
+  tempRepos.push(repo);
   await Bun.write(path.join(repo, "src/app.ts"), "export const x = 1;\n");
   const planPath = path.join(repo, "PLAN.md");
   await Bun.write(planPath, "# Plan\n\n## Auth\nCompare tokens with ===.\n");
   return { repo, planPath };
+}
+
+/** Remove every repository created by tempRepo(); call from afterAll. */
+export async function removeTempRepos(): Promise<void> {
+  await Promise.all(tempRepos.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 }
 
 export function config(repo: string, planPath: string, over: Partial<RunConfig> = {}): RunConfig {

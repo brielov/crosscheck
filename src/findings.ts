@@ -78,8 +78,6 @@ const VERDICT_FROM: Record<ReviewerVerdict, ReadonlySet<FindingStatus>> = {
   needs_user_decision: new Set(["open", "addressed", "disputed"]),
 };
 
-const DUPLICATE_SIMILARITY = 0.75;
-
 /**
  * The findings ledger. IDs are assigned here, never by agents, and status
  * changes are gated by actor: only the reviewer can close a finding.
@@ -105,7 +103,7 @@ export class Ledger {
 
   /**
    * Record a reviewer finding. A restatement of an existing finding (declared
-   * via duplicateOf or detected by text similarity) does not create a new ID;
+   * via duplicateOf or matching problem/location) does not create a new ID;
    * if the existing finding was closed, it is reopened.
    */
   raise(
@@ -115,11 +113,22 @@ export class Ledger {
   ): { finding: Finding; created: boolean; reopened: boolean } {
     const existing =
       (input.duplicateOf ? this.#findings.get(input.duplicateOf) : undefined) ??
-      this.#findSimilar(input);
+      this.#findSame(input);
     if (existing) {
+      const rank = { low: 0, medium: 1, high: 2 };
+      if (rank[input.severity] > rank[existing.severity]) existing.severity = input.severity;
+      existing.problem = input.problem;
+      existing.location = input.location;
+      existing.evidence = input.evidence;
+      existing.evidenceType = input.evidenceType;
+      existing.assumptions = input.assumptions;
+      existing.suggestion = input.suggestion;
       if (CLOSED_STATUSES.has(existing.status)) {
         this.#transition(existing, round, "reviewer", "open", `Re-raised: ${input.problem}`);
         existing.needsUserDecision = null;
+        existing.disputeRounds = 0;
+        existing.authorResponse = null;
+        existing.verification = null;
         return { finding: existing, created: false, reopened: true };
       } else {
         existing.history.push({
@@ -159,6 +168,8 @@ export class Ledger {
     }
     f.authorResponse = response;
     if (response.action === "accept") {
+      f.needsUserDecision = null;
+      f.disputeRounds = 0;
       this.#transition(f, response.round, "author", "addressed", response.response);
     } else {
       if (response.action === "needs_user_decision") f.needsUserDecision = response.response;
@@ -178,9 +189,11 @@ export class Ledger {
     f.verification = v;
     switch (v.verdict) {
       case "verified":
+        f.needsUserDecision = null;
         this.#transition(f, v.round, "reviewer", "verified", v.reason);
         break;
       case "withdrawn":
+        f.needsUserDecision = null;
         this.#transition(f, v.round, "reviewer", "withdrawn", v.reason);
         break;
       case "not_resolved":
@@ -248,30 +261,15 @@ export class Ledger {
     f.status = to;
   }
 
-  #findSimilar(input: NewFindingInput): Finding | undefined {
-    const a = tokens(`${input.title} ${input.location} ${input.problem}`);
-    let best: { f: Finding; score: number } | undefined;
-    for (const f of this.#findings.values()) {
-      if (f.category !== input.category) continue;
-      const score = jaccard(a, tokens(`${f.title} ${f.location} ${f.problem}`));
-      if (score >= DUPLICATE_SIMILARITY && (!best || score > best.score)) best = { f, score };
-    }
-    return best?.f;
+  #findSame(input: NewFindingInput): Finding | undefined {
+    // Similar wording is not enough: different paths, limits or negations can
+    // describe independent bugs. Semantic paraphrases require duplicateOf.
+    const normalize = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+    return this.list().find(
+      (f) =>
+        f.category === input.category &&
+        normalize(f.location) === normalize(input.location) &&
+        normalize(f.problem) === normalize(input.problem),
+    );
   }
-}
-
-function tokens(s: string): Set<string> {
-  return new Set(
-    s
-      .toLowerCase()
-      .split(/[^a-z0-9_]+/)
-      .filter((t) => t.length > 2),
-  );
-}
-
-function jaccard(a: Set<string>, b: Set<string>): number {
-  if (a.size === 0 || b.size === 0) return 0;
-  let inter = 0;
-  for (const t of a) if (b.has(t)) inter += 1;
-  return inter / (a.size + b.size - inter);
 }

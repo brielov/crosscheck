@@ -19,6 +19,8 @@ export interface SessionSpec {
   instructions: string;
   /** Structured output every turn of this session must produce. */
   schema: z.ZodType;
+  /** Cancels runtime startup as well as turns. */
+  signal: AbortSignal;
   onActivity?: (activity: AgentActivity) => void;
 }
 

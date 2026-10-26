@@ -4,7 +4,7 @@ import { appendFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { createHarnessBackend } from "./agents/harness-backend.ts";
+import { createHarnessBackend, defaultCodexConfig } from "./agents/harness-backend.ts";
 import { createRepoTools } from "./agents/repo-tools.ts";
 import { Ledger, type Finding } from "./findings.ts";
 import { runReview, type RunState } from "./orchestrator.ts";
@@ -114,12 +114,15 @@ export function parseEffort(spec: string): Partial<Record<"author" | "reviewer",
   }
   const result: Partial<Record<"author" | "reviewer", Effort>> = {};
   for (const part of spec.split(",")) {
-    const [role, value = ""] = part.split("=").map((s) => s.trim());
+    const pieces = part.split("=").map((s) => s.trim());
+    if (pieces.length !== 2) throw new UsageError("--effort: expected role=level");
+    const [role, value = ""] = pieces;
     if (role !== "author" && role !== "reviewer") {
       throw new UsageError(
         `--effort: unknown role "${role}" (use author=<level> and/or reviewer=<level>)`,
       );
     }
+    if (result[role]) throw new UsageError(`--effort: ${role} specified more than once`);
     result[role] = level(value);
   }
   return result;
@@ -135,14 +138,19 @@ function withEffort(
   };
 }
 
-function positiveInt(value: string, flag: string): number {
+function positiveInt(value: string, flag: string, max = Number.MAX_SAFE_INTEGER): number {
   const n = Number(value);
-  if (!Number.isInteger(n) || n < 1)
-    throw new UsageError(`${flag}: expected a positive integer, got "${value}"`);
+  if (!Number.isSafeInteger(n) || n < 1 || n > max)
+    throw new UsageError(
+      `${flag}: expected a positive integer no greater than ${max}, got "${value}"`,
+    );
   return n;
 }
 
 async function readText(file: string, flag: string): Promise<string> {
+  const info = await stat(file).catch(() => null);
+  if (!info?.isFile())
+    throw new UsageError(`${flag}: file not found or not a regular file: ${file}`);
   const f = Bun.file(file);
   if (!(await f.exists())) throw new UsageError(`${flag}: file not found: ${file}`);
   return f.text();
@@ -191,19 +199,31 @@ export async function parseCli(argv: string[]): Promise<Parsed | "help" | "versi
   }
   if (args.length > 1) throw new UsageError("expected at most one plan file");
 
+  if (values.brief !== undefined && values["brief-file"] !== undefined)
+    throw new UsageError("give either --brief or --brief-file, not both");
+  if (values.constraints !== undefined && values["constraints-file"] !== undefined)
+    throw new UsageError("give either --constraints or --constraints-file, not both");
+
   const brief =
     values.brief ??
     (values["brief-file"] ? await readText(values["brief-file"], "--brief-file") : undefined);
   const planArg = args[0];
-  if (planArg && brief) throw new UsageError("give either a plan file or --brief, not both");
+  if (planArg && brief !== undefined)
+    throw new UsageError("give either a plan file or --brief, not both");
+  if (brief !== undefined && !brief.trim()) throw new UsageError("--brief is empty");
   const verbose = values.verbose ?? false;
-  if (!planArg && !brief) return { config: null, verbose, interactive: true };
+  if (!planArg && brief === undefined) {
+    if (positionals.length || Object.keys(values).some((key) => key !== "verbose"))
+      throw new UsageError(
+        "a plan file or --brief is required when using run options; run crosscheck without options for interactive mode",
+      );
+    return { config: null, verbose, interactive: true };
+  }
 
   let input: RunConfig["input"];
   if (planArg) {
     const planPath = path.resolve(planArg);
-    if (!(await Bun.file(planPath).exists()))
-      throw new UsageError(`plan file not found: ${planArg}`);
+    if (!(await readText(planPath, "plan")).trim()) throw new UsageError("plan file is empty");
     input = { kind: "plan", planPath };
   } else {
     if (!brief!.trim()) throw new UsageError("--brief is empty");
@@ -220,18 +240,20 @@ export async function parseCli(argv: string[]): Promise<Parsed | "help" | "versi
     config: {
       input,
       repo: await assertDir(values.repo ?? "."),
-      focus: values.focus ? parseFocus(values.focus) : DEFAULT_FOCUS,
+      focus: values.focus !== undefined ? parseFocus(values.focus) : DEFAULT_FOCUS,
       constraints: constraints.trim(),
-      maxRounds: values.rounds ? positiveInt(values.rounds, "--rounds") : DEFAULTS.rounds,
+      maxRounds:
+        values.rounds !== undefined ? positiveInt(values.rounds, "--rounds") : DEFAULTS.rounds,
       timeoutMs:
-        (values.timeout ? positiveInt(values.timeout, "--timeout") : DEFAULTS.timeoutMinutes) *
-        60_000,
+        (values.timeout !== undefined
+          ? positiveInt(values.timeout, "--timeout", Math.floor(2_147_483_647 / 60_000))
+          : DEFAULTS.timeoutMinutes) * 60_000,
       ...withEffort(
         {
           author: parseAgent(values.author ?? DEFAULTS.author, "--author"),
           reviewer: parseAgent(values.reviewer ?? DEFAULTS.reviewer, "--reviewer"),
         },
-        values.effort ? parseEffort(values.effort) : {},
+        values.effort !== undefined ? parseEffort(values.effort) : {},
       ),
       checks: values.check ?? [],
     },
@@ -316,12 +338,14 @@ async function interactive(): Promise<RunConfig> {
     repo: await assertDir(repo || "."),
     focus,
     constraints: (constraints ?? "").trim(),
-    maxRounds: Number(rounds || DEFAULTS.rounds),
+    maxRounds: positiveInt(rounds || String(DEFAULTS.rounds), "--rounds"),
     timeoutMs: DEFAULTS.timeoutMinutes * 60_000,
     author: parseAgent(DEFAULTS.author, "--author"),
     reviewer: parseAgent(DEFAULTS.reviewer, "--reviewer"),
     checks: [],
   };
+  if (input.kind === "plan" && !(await readText(input.planPath, "plan")).trim())
+    throw new UsageError("plan file is empty");
   p.note(
     `Author: ${config.author.provider} · Reviewer: ${config.reviewer.provider} · time limit ${DEFAULTS.timeoutMinutes} min\nAgents get read-only repository tools; no commands are executed.\n(Use flags for models, --effort, --check commands and --timeout; see --help.)`,
     "Run settings",
@@ -364,7 +388,7 @@ function printSummary(state: RunState, findings: Finding[], dir: string) {
   // Paths go to stdout so they are easy to capture.
   process.stdout.write(
     [
-      `Plan:       ${path.join(dir, "plan.md")}`,
+      ...(last ? [`Plan:       ${path.join(dir, "plan.md")}`] : []),
       `Report:     ${path.join(dir, "report.md")}`,
       `Transcript: ${path.join(dir, "transcript.jsonl")}`,
       "",
@@ -425,7 +449,17 @@ async function main(argv: string[]): Promise<number> {
     }
   }
 
-  const store = await RunStore.create(config.repo);
+  const codexDefaults = await defaultCodexConfig();
+  for (const role of ["author", "reviewer"] as const) {
+    if (config[role].provider === "codex") config[role] = { ...codexDefaults, ...config[role] };
+  }
+  let store: RunStore;
+  try {
+    store = await RunStore.create(config.repo);
+  } catch (e) {
+    process.stderr.write(`crosscheck: cannot create run directory: ${(e as Error).message}\n`);
+    return 1;
+  }
   const progress = createProgress({ verbose: parsed.verbose, maxRounds: config.maxRounds });
   captureHarnessLogs(
     store.path("harness.log"),
@@ -459,12 +493,15 @@ async function main(argv: string[]): Promise<number> {
     onEvent: (e) => progress.handle(e),
     createBackend: ({ onCheck }) =>
       createHarnessBackend({
-        repo: config.repo,
         tools: createRepoTools({ repo: config.repo, checks: config.checks, onCheck }),
       }),
   });
   progress.stop();
-  const findings = (await Bun.file(store.path("findings.json")).json()) as Finding[];
+  const findings = (await Bun.file(store.path("findings.json"))
+    .json()
+    .catch(() => [])) as Finding[];
+  process.off("SIGINT", onSigint);
+  process.off("SIGTERM", onSigint);
   printSummary(state, findings, store.dir);
   return EXIT_CODES[state.status === "running" ? "error" : state.status];
 }

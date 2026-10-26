@@ -1,5 +1,5 @@
-import { beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, symlink } from "node:fs/promises";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtemp, rm, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -17,6 +17,10 @@ import { agentLabel } from "../src/orchestrator.ts";
 
 let repo: string;
 let outside: string;
+
+afterAll(async () => {
+  await Promise.all([repo, outside].map((dir) => rm(dir, { recursive: true, force: true })));
+});
 
 beforeAll(async () => {
   repo = await mkdtemp(path.join(os.tmpdir(), "crosscheck-tools-"));
@@ -47,12 +51,43 @@ describe("path policy", () => {
     [".crosscheck/runs/x/transcript.jsonl", "not accessible"],
     [".git/config", "not accessible"],
     [".env", "secrets"],
+    [".env.local~", "secrets"],
+    [".envrc", "secrets"],
   ])("denies %s", async (p, reason) => {
     await expect(resolveRepoPath(repo, p)).rejects.toThrow(reason);
   });
 
   test("allows .env.example", async () => {
     expect(await readFileTool(repo, ".env.example")).toContain("SECRET=");
+  });
+
+  test("reads large files by range and rejects invalid ranges and special files", async () => {
+    await Bun.write(path.join(repo, "large.txt"), "padding\n".repeat(40_000) + "target\n");
+    await expect(readFileTool(repo, "large.txt")).rejects.toThrow("line range");
+    expect(await readFileTool(repo, "large.txt", 40_001, 40_001)).toBe("40001\ttarget");
+    await expect(readFileTool(repo, "large.txt", -1, 3)).rejects.toThrow("line range");
+    await expect(readFileTool(repo, "large.txt", 3, 1)).rejects.toThrow("line range");
+    await Bun.$`mkfifo pipe`.cwd(repo).quiet();
+    await expect(readFileTool(repo, "pipe")).rejects.toThrow("regular file");
+  });
+
+  test("search handles colon filenames and never exposes nested protected files", async () => {
+    await Bun.write(path.join(repo, "colon:name.ts"), "visible-marker\n");
+    await Bun.write(path.join(repo, "nested:dir/.crosscheck/transcript.jsonl"), "hidden-marker\n");
+    await Bun.write(path.join(repo, "nested:dir/.npmrc"), "hidden-marker\n");
+    expect(await searchTool(repo, "visible-marker")).toContain("colon:name.ts:1:visible-marker");
+    expect(await searchTool(repo, "hidden-marker")).toBe("(no matches)");
+  });
+
+  test("read-only tools honor an already aborted signal", async () => {
+    const signal = AbortSignal.abort(new Error("cancel test"));
+    await expect(readFileTool(repo, "src/auth.ts", undefined, undefined, signal)).rejects.toThrow(
+      "cancel test",
+    );
+    await expect(searchTool(repo, "checkToken", ".", undefined, false, signal)).rejects.toThrow(
+      "cancel test",
+    );
+    await expect(gitTool(repo, ["log"], signal)).rejects.toThrow("cancel test");
   });
 
   test("listing and search hide run data and secrets", async () => {
@@ -81,8 +116,45 @@ describe("git policy", () => {
     [["branch", "evil"]],
     [["branch", "-D", "main"]],
     [["tag", "v1"]],
+    [["branch", "--unset-upstream"]],
+    [["blame", "--contents", "/etc/passwd", "--", "src/auth.ts"]],
+    [["cat-file", "--filters", "HEAD:src/auth.ts"]],
+    [["show", "HEAD:.env"]],
+    [["log", "-L1,10:.env"]],
   ])("denies git %p", (args) => {
     expect(() => checkGitArgs(args)).toThrow(ToolDenied);
+  });
+
+  test("history and diffs cannot expose protected files or execute configured helpers", async () => {
+    const fixture = await mkdtemp(path.join(os.tmpdir(), "crosscheck-git-policy-"));
+    try {
+      await Bun.write(path.join(fixture, ".env"), "FIXTURE_SECRET=private\n");
+      await Bun.write(path.join(fixture, "safe.txt"), "before\n");
+      await Bun.$`git init -q && git add . && git -c user.email=t@t -c user.name=t commit -qm fixture`
+        .cwd(fixture)
+        .quiet();
+      const blob = (await Bun.$`git rev-parse HEAD:.env`.cwd(fixture).text()).trim();
+      await expect(gitTool(fixture, ["show", blob])).rejects.toThrow();
+      expect(await gitTool(fixture, ["show", "HEAD"])).not.toContain("FIXTURE_SECRET");
+      await Bun.write(path.join(fixture, ".env"), "FIXTURE_SECRET=changed\n");
+      expect(await gitTool(fixture, ["diff"])).not.toContain("FIXTURE_SECRET");
+      await Bun.write(path.join(fixture, "safe.txt"), "after\n");
+      await Bun.write(path.join(fixture, ".gitattributes"), "*.txt diff=audit\n");
+      await Bun.$`git config diff.audit.command "touch executed" && git config diff.audit.textconv "touch converted"`
+        .cwd(fixture)
+        .quiet();
+      expect(await gitTool(fixture, ["diff"])).toContain("after");
+      expect(await Bun.file(path.join(fixture, "executed")).exists()).toBe(false);
+      expect(await Bun.file(path.join(fixture, "converted")).exists()).toBe(false);
+    } finally {
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
+
+  test("git commands remain scoped when --repo is a subdirectory", async () => {
+    await expect(gitTool(path.join(repo, "src"), ["show", "HEAD:.env.example"])).rejects.toThrow();
+    expect(await gitTool(path.join(repo, "src"), ["show", "HEAD"])).not.toContain("SECRET=");
+    expect(await searchTool(path.join(repo, "src"), "checkToken")).toContain("auth.ts:1:");
   });
 });
 
@@ -189,6 +261,27 @@ describe("cli parsing", () => {
 
   test("no input means interactive", async () => {
     expect(await parseCli([])).toMatchObject({ interactive: true, config: null });
+  });
+
+  test("invalid or conflicting options never silently fall back to interactive defaults", async () => {
+    for (const argv of [
+      ["--brief", ""],
+      ["--brief", "x", "--brief-file", "missing.md"],
+      ["--brief", "x", "--constraints", "x", "--constraints-file", "missing.md"],
+      ["--repo", repo, "--effort", "high"],
+      ["plan"],
+      ["--brief", "x", "--rounds", ""],
+      ["--brief", "x", "--timeout", "9999999999"],
+      ["--brief", "x", "--focus", ""],
+      ["--brief", "x", "--effort", ""],
+      ["--brief", "x", "--effort", "author=high=ignored"],
+      ["--brief", "x", "--effort", "author=high,author=low"],
+    ])
+      await expect(parseCli(argv)).rejects.toThrow();
+    const empty = path.join(repo, "EMPTY.md");
+    await Bun.write(empty, " \n");
+    await expect(parseCli(["plan", empty])).rejects.toThrow("empty");
+    await expect(parseCli(["plan", repo])).rejects.toThrow("regular file");
   });
 
   test("validation errors", () => {

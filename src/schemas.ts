@@ -122,6 +122,8 @@ export function checkReviewerOutput(
       );
     if (seen.has(v.id)) errors.push(`verdicts: ${v.id} appears more than once`);
     seen.add(v.id);
+    if (!v.reason.trim() || !v.evidence.trim())
+      errors.push(`verdicts: ${v.id} requires a reason and evidence`);
   }
   for (const id of ctx.mustVerify) {
     if (!seen.has(id)) errors.push(`verdicts: missing a verdict for ${id}`);
@@ -129,8 +131,16 @@ export function checkReviewerOutput(
   for (const [i, f] of out.new_findings.entries()) {
     if (f.duplicate_of && !byId.has(f.duplicate_of))
       errors.push(`new_findings[${i}].duplicate_of: unknown ID ${f.duplicate_of}`);
-    if (!f.problem.trim() || !f.location.trim() || !f.suggestion.trim())
-      errors.push(`new_findings[${i}]: problem, location and suggestion must be non-empty`);
+    if (
+      !f.title.trim() ||
+      !f.problem.trim() ||
+      !f.location.trim() ||
+      !f.suggestion.trim() ||
+      !f.evidence.trim()
+    )
+      errors.push(
+        `new_findings[${i}]: title, problem, location, evidence and suggestion must be non-empty`,
+      );
   }
   return errors;
 }

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import path from "node:path";
 import { AgentError } from "../src/agents/backend.ts";
 import type { Finding } from "../src/findings.ts";
@@ -15,7 +15,10 @@ import {
   tempRepo,
   verdict,
   type Step,
+  removeTempRepos,
 } from "./fake-backend.ts";
+
+afterAll(removeTempRepos);
 
 const REVISED = "# Plan\n\n## Auth\nCompare tokens with crypto.timingSafeEqual.\n";
 
@@ -149,9 +152,13 @@ describe("review loop", () => {
     const { state, findings, store } = await run({ reviewer: [bad, bad], author: [] });
     expect(state.status).toBe("error");
     expect(findings).toHaveLength(0);
-    const transcript = (await Bun.file(store.path("transcript.jsonl")).text()).trim().split("\n");
+    const transcript = (await Bun.file(store.path("transcript.jsonl")).text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .filter((entry) => entry.type === "turn-complete");
     expect(transcript).toHaveLength(2);
-    expect(JSON.parse(transcript[1]!).prompt).toContain("could not be accepted");
+    expect(transcript[1]!.prompt).toContain("could not be accepted");
   });
 
   test("a corrected response is accepted", async () => {
@@ -278,6 +285,161 @@ describe("review loop", () => {
 });
 
 describe("budgets, cancellation and failures", () => {
+  test("an already cancelled run never starts an agent", async () => {
+    const { state, fake } = await run({ reviewer: [], author: [] }, {}, AbortSignal.abort());
+    expect(state.status).toBe("cancelled");
+    expect(fake.opened).toEqual([]);
+  });
+
+  test("runtime startup receives the deadline signal", async () => {
+    const { repo, planPath } = await tempRepo();
+    const state = await runReview({
+      config: config(repo, planPath, { timeoutMs: 30 }),
+      store: await RunStore.create(repo),
+      createBackend: () => ({
+        openSession: (spec) =>
+          new Promise((_, reject) => {
+            expect(spec.signal).toBeInstanceOf(AbortSignal);
+            spec.signal.addEventListener("abort", () => reject(spec.signal.reason), { once: true });
+          }),
+      }),
+    });
+    expect(state.status).toBe("budget_exhausted");
+  });
+
+  test("a turn that returns after cancellation cannot report success", async () => {
+    const controller = new AbortController();
+    const { state } = await run(
+      {
+        author: [],
+        reviewer: [
+          () => {
+            controller.abort();
+            return review();
+          },
+        ],
+      },
+      {},
+      controller.signal,
+    );
+    expect(state.status).toBe("cancelled");
+  });
+
+  test("a check alone does not qualify as repository inspection", async () => {
+    const lazy = {
+      ...review(),
+      toolCalls: [
+        { name: "run_check", input: { command: "true" }, ok: true, summary: "exit code 0" },
+      ],
+    };
+    const { state } = await run({ author: [], reviewer: [lazy, lazy] });
+    expect(state.status).toBe("error");
+  });
+
+  test("artifact write failures cannot return success", async () => {
+    const { repo, planPath } = await tempRepo();
+    const store = await RunStore.create(repo);
+    const writeText = store.writeText.bind(store);
+    store.writeText = async (name, text) => {
+      if (name === "report.md") throw new Error("fixture: disk full");
+      return writeText(name, text);
+    };
+    const fake = fakeBackend({ author: [], reviewer: [review()] });
+    const state = await runReview({
+      config: config(repo, planPath),
+      store,
+      createBackend: () => fake.backend,
+    });
+    expect(state.status).toBe("error");
+    expect(state.reason).toContain("could not save run artifacts");
+    expect((await Bun.file(store.path("run.json")).json()).status).toBe("error");
+  });
+
+  test("backend construction failures still produce a report", async () => {
+    const { repo, planPath } = await tempRepo();
+    const store = await RunStore.create(repo);
+    const state = await runReview({
+      config: config(repo, planPath),
+      store,
+      createBackend: () => {
+        throw new Error("backend setup failed");
+      },
+    });
+    expect(state.status).toBe("error");
+    expect(await Bun.file(store.path("report.md")).text()).toContain("backend setup failed");
+  });
+
+  test("partial text and failed turn prompts survive cancellation", async () => {
+    const { repo, planPath } = await tempRepo();
+    const store = await RunStore.create(repo);
+    const controller = new AbortController();
+    const state = await runReview({
+      config: config(repo, planPath),
+      store,
+      signal: controller.signal,
+      createBackend: () => ({
+        openSession: async (spec) => ({
+          send: async () => {
+            spec.onActivity?.({ kind: "text", delta: "partial investigation" });
+            controller.abort();
+            throw controller.signal.reason;
+          },
+          close: async () => {},
+        }),
+      }),
+    });
+    expect(state.status).toBe("cancelled");
+    const transcript = await Bun.file(store.path("transcript.jsonl")).text();
+    expect(transcript).toContain("partial investigation");
+    expect(transcript).toContain("turn-start");
+    expect(transcript).toContain("turn-error");
+  });
+
+  test("streamed text is batched in the transcript, ordered with tool events", async () => {
+    const { repo, planPath } = await tempRepo();
+    const store = await RunStore.create(repo);
+    const state = await runReview({
+      config: config(repo, planPath),
+      store,
+      createBackend: () => ({
+        openSession: async (spec) => ({
+          send: async () => {
+            for (const word of ["Reading ", "the ", "plan."])
+              spec.onActivity?.({ kind: "text", delta: word });
+            spec.onActivity?.({
+              kind: "tool-call",
+              name: "read_file",
+              input: { path: "src/app.ts" },
+            });
+            spec.onActivity?.({ kind: "text", delta: "Looks fine." });
+            return {
+              text: "",
+              output: review().output,
+              usage: {},
+              toolCalls: [{ name: "read_file", input: {}, ok: true, summary: "" }],
+            };
+          },
+          close: async () => {},
+        }),
+      }),
+    });
+    expect(state.status).toBe("review_complete");
+    const records = (await Bun.file(store.path("transcript.jsonl")).text())
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    const activities = records.filter((r) => r.type === "activity").map((r) => r.activity);
+    expect(activities).toEqual([
+      { kind: "text", delta: "Reading the plan." },
+      { kind: "tool-call", name: "read_file", input: { path: "src/app.ts" } },
+      { kind: "text", delta: "Looks fine." },
+    ]);
+    // The trailing text is flushed before the turn is recorded as complete.
+    expect(records.findIndex((r) => r.activity?.delta === "Looks fine.")).toBeLessThan(
+      records.findIndex((r) => r.type === "turn-complete"),
+    );
+  });
+
   test("the run timeout ends the run as budget_exhausted and closes sessions", async () => {
     const { state, fake } = await run({ reviewer: ["hang"], author: [] }, { timeoutMs: 150 });
     expect(state.status).toBe("budget_exhausted");

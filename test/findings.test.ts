@@ -126,6 +126,49 @@ describe("Ledger", () => {
     expect(other.created).toBe(true);
   });
 
+  test("similar findings at different locations or with different limits retain separate IDs", () => {
+    const l = new Ledger();
+    l.raise(1, "reviewer", input({ location: "src/admin.ts:4" }));
+    expect(l.raise(1, "reviewer", input({ location: "src/users.ts:4" })).created).toBe(true);
+    l.raise(
+      1,
+      "reviewer",
+      input({ problem: "The API rejects requests exceeding 1 key per user per hour" }),
+    );
+    expect(
+      l.raise(
+        1,
+        "reviewer",
+        input({ problem: "The API rejects requests exceeding 2 keys per user per hour" }),
+      ).created,
+    ).toBe(true);
+    expect(l.list()).toHaveLength(4);
+  });
+
+  test("a material restatement upgrades a low finding instead of permitting success", () => {
+    const l = new Ledger();
+    l.raise(1, "reviewer", input({ severity: "low" }));
+    l.raise(2, "reviewer", input({ severity: "high", evidence: "new evidence" }));
+    expect(l.get("F1")!.severity).toBe("high");
+    expect(l.get("F1")!.evidence).toContain("new evidence");
+    expect(evaluate(l, { newMaterial: 0, failedChecks: [] })).toBeNull();
+  });
+
+  test("reopening a closed finding clears stale responses and dispute counters", () => {
+    const l = new Ledger();
+    l.raise(1, "reviewer", input());
+    l.respond("F1", { ...accept, action: "dispute" });
+    l.verify("F1", verdict("maintain_dispute"));
+    l.verify("F1", verdict("withdrawn"));
+    l.raise(3, "reviewer", input({ duplicateOf: "F1" }));
+    expect(l.get("F1")).toMatchObject({
+      status: "open",
+      disputeRounds: 0,
+      authorResponse: null,
+      verification: null,
+    });
+  });
+
   test("disputes needing the user produce needs_input", () => {
     const l = new Ledger();
     l.raise(1, "codex", input());
@@ -207,5 +250,21 @@ describe("output validation", () => {
         { mustRespond: [], drafting: true },
       ),
     ).toEqual(["revised_plan: the initial plan is required"]);
+  });
+
+  test("a reviewer cannot close findings without a reason and evidence", () => {
+    const l = new Ledger();
+    l.raise(1, "reviewer", input());
+    l.respond("F1", accept);
+    const errors = checkReviewerOutput(
+      {
+        summary: "",
+        verdicts: [{ id: "F1", verdict: "verified", reason: "", evidence: "" }],
+        new_findings: [],
+        assumptions: [],
+      },
+      { findings: l.list(), mustVerify: ["F1"], toolCalls: 1, initial: false },
+    );
+    expect(errors).toContain("verdicts: F1 requires a reason and evidence");
   });
 });

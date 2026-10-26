@@ -76,7 +76,9 @@ crosscheck plan \
 
 Model defaults: Claude Code uses your account's default model. For Codex, crosscheck uses the `model` in your `~/.codex/config.toml` when set, because the adapter's built-in default (`gpt-5.5`) is not available on every plan. Override either with `--author claude-code:claude-sonnet-5-5` or `--reviewer codex:gpt-6-luna`. Roles are symmetric: `--author codex --reviewer claude-code` works too.
 
-Effort defaults: without `--effort`, each runtime picks its own: Claude Code its default for the model, and Codex your `model_reasoning_effort` in `~/.codex/config.toml`. The level is passed to Claude Code as `effort` (it applies with adaptive thinking) and to Codex as `reasoningEffort`. The chosen level appears in agent labels, e.g. `codex:gpt-6-luna [high] (reviewer)`, and is recorded in `run.json`.
+Effort defaults: without `--effort`, Claude Code uses its default for the model, and crosscheck reads Codex's `model_reasoning_effort` from `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`). The level is passed to Claude Code as `effort` (it applies with adaptive thinking) and to Codex as `reasoningEffort`. The chosen level appears in agent labels, e.g. `codex:gpt-6-luna [high] (reviewer)`, and is recorded in `run.json`. Only Codex's model and effort defaults are copied; runtime settings, hooks, MCP servers and plugins are not inherited.
+
+Interactive mode accepts `--verbose`. Other run options require a plan or brief, so flags are never silently discarded. Empty plans/briefs and conflicting input flags are rejected.
 
 ### Progress
 
@@ -117,7 +119,7 @@ Each finding has a stable ID (`F1`, `F2`, …) assigned by crosscheck, never by 
 | `verified` | the reviewer confirmed the revision resolves it (closed) | reviewer only |
 | `withdrawn` | the reviewer retracted it with a reason (closed) | reviewer only |
 
-The author cannot close a finding. A restatement of an existing finding is merged into the existing ID: the reviewer can declare `duplicate_of`, and crosscheck also detects close paraphrases. A closed finding that comes back is reopened under its original ID.
+The author cannot close a finding. A restatement of an existing finding is merged into the existing ID: the reviewer can declare `duplicate_of`, and crosscheck automatically merges matching category, location and problem text (ignoring case and whitespace). Similar wording at different locations or with different numeric limits stays separate. New evidence is retained and severity can increase; merging cannot demote a material issue to a low suggestion. A closed finding that comes back is reopened under its original ID, with stale responses and dispute counters cleared.
 
 ### Outcomes
 
@@ -139,10 +141,11 @@ Both agents return schema-validated structured output, using each runtime's nati
 ## Permissions and safety
 
 - **The agents have no write or shell tools.** crosscheck disables each harness's built-in tools (shell, file edits, web search) and gives both agents the same host-executed tools instead:
-  - `read_file`, `list_files`, `search` (git grep), confined to the repository. Symlink escapes, `.git/`, `.crosscheck/` and likely secret files (`.env*` except `.env.example`, `*.pem`, `*.key`, SSH keys, `.npmrc`, `.netrc`) are refused.
-  - `git` with read-only subcommands only (`log`, `show`, `diff`, `blame`, …). Writing flags such as `--output`, `--no-index` and `--ext-diff` are refused.
+  - `read_file`, `list_files`, `search` (git grep), confined to the repository. Symlink escapes, `.git/`, `.crosscheck/` and likely secret files (`.env*`, `*.pem`, `*.key`, SSH keys, `.npmrc`, `.netrc`) are refused. `read_file` and `list_files` allow `.env.example`, `.env.sample` and `.env.template`; search conservatively excludes all `.env*` files.
+  - `git` with a narrow allowlist of subcommands and options: `log`, `show`, `diff`, `blame`, `ls-files`, `status`, `rev-parse`, `branch` and `tag` (listing only). Paths must follow `--`, and revisions must resolve to commits. Raw blob reads (`HEAD:file`, `cat-file`), `blame --contents`, configuration changes, external diff/text conversion helpers and filesystem-monitor hooks are disabled. History and diffs exclude protected paths, including environment templates; use `read_file` for those templates.
   - `run_check`, only if you pass `--check`, and only for those exact command strings. Your check commands run with your normal permissions, so only permit commands you trust in this repository.
 - These rules are enforced in code (`src/agents/repo-tools.ts`), not by prompts. As a second layer, Claude Code runs in an approval-gated permission mode, and crosscheck denies any approval request it receives.
+- Each runtime starts in a temporary working directory with an empty configuration directory. Host credentials are discovered by the adapters before launch; agents inspect the requested repository only through crosscheck's tools. Codex's additional capability sources (apps, plugins, hooks, subagents, browser/computer tools and skill-driven MCP installation) are disabled explicitly. Runtime directories are removed on shutdown.
 - The original plan file is never modified. All plan versions are written by crosscheck itself into the run directory.
 - The run directory is `<repo>/.crosscheck/`. It contains its own `.gitignore` (`*`), so it never shows up in `git status`. At the end, crosscheck compares the working tree with its state at the start and warns if anything changed.
 
@@ -156,14 +159,14 @@ Both agents return schema-validated structured output, using each runtime's nati
   plan.md             latest plan version
   plan/v0.md, v1.md … every plan version (v0 = your original or the author's draft)
   input/              config.json, brief.md, constraints.md, plan.original.md (copy of your input)
-  transcript.jsonl    every agent turn: prompt, text, structured output, validation errors, tool calls, usage
+  transcript.jsonl    turn starts, streamed activities, completed output/usage/validation, and failed turns
   events.jsonl        phases, tool calls and results, verification checks
   harness.log         diagnostics printed by the harness bridges/runtimes (kept off the terminal unless --verbose)
   report.md           concise report: outcome and why, what changed, resolved/disputed/unresolved findings,
                       decisions for you, low-severity suggestions, checks, assumptions, what was examined
 ```
 
-Everything is written incrementally (JSONL appends and atomic JSON rewrites), so an interrupted or failed run keeps the work it completed. `report.md` is written even on error or cancellation.
+Everything is written incrementally (ordered JSONL appends and atomic JSON rewrites), so an interrupted or failed run keeps completed work and partial streamed text. `report.md` is written even on error or cancellation when storage is available. A failed artifact write produces `error`, never a successful exit.
 
 Usage: token counts are those the harness reports. Cost is shown only when the runtime reports one: Claude Code reports an API-equivalent estimate, Codex reports none ("n/a").
 
@@ -180,6 +183,7 @@ src/store.ts / report.ts      run directory and Markdown report
 src/agents/backend.ts         transport-independent AgentBackend/AgentSession interface
 src/agents/harness-backend.ts HarnessAgent implementation (Claude Code + Codex adapters)
 src/agents/local-sandbox.ts   host-backed sandbox session so the adapters run locally
+src/agents/process.ts         process-group cancellation and bounded command output
 src/agents/repo-tools.ts      read-only repository tools and their policy
 spike/harness-spike.ts        the integration spike (see below)
 ```
@@ -202,11 +206,12 @@ The orchestrator only depends on `AgentBackend`. An ACP or native-SDK backend ca
 
 Findings that shaped the implementation:
 
-1. **Where the adapters execute.** Both adapters run a WebSocket bridge (plus the agent CLI) "inside a sandbox" and connect to it through a sandbox-exposed port. The only published network sandbox is Vercel Sandbox, which is remote and would review an uploaded copy of the repository rather than your checkout. crosscheck implements the documented `HarnessV1NetworkSandboxSession` interface on the host (`local-sandbox.ts`): commands run as local processes in their own process group (cleanly killed on cancel), and the bridge listens on `127.0.0.1`. **This shim provides no isolation by itself.**
+1. **Where the adapters execute.** Both adapters run a WebSocket bridge (plus the agent CLI) "inside a sandbox" and connect to it through a sandbox-exposed port. The only published network sandbox is Vercel Sandbox, which is remote and would review an uploaded copy of the repository rather than your checkout. crosscheck implements the documented `HarnessV1NetworkSandboxSession` interface on the host (`local-sandbox.ts`): commands run as local processes in their own process group (cleanly killed on cancel), and the bridge listens on `127.0.0.1`. Runtime configuration is isolated in temporary directories, while host tools inspect the checkout. **This shim provides no OS sandbox by itself.**
 2. **The Codex adapter cannot restrict its built-in tools.** It hardcodes `sandbox_mode="danger-full-access"` and `approval_policy="never"`, asserts both at thread start, and does not support approval requests, because it relies on the external sandbox for isolation. Run on the host, Codex's shell would have full access. crosscheck therefore disables every Codex built-in (which also disables Codex execution environments) and provides the read-only host tools. Repository investigation goes through those tools instead of an arbitrary shell. That is a real reduction in the reviewer's power: it can read, search and inspect git history, but it can only execute your `--check` commands.
 3. **For consistency, Claude Code uses the same host tools**, with its built-ins disabled. Approval-gated permission mode stays on as a second layer.
 4. **Pinned versions:** `@ai-sdk/harness@1.0.158`, `@ai-sdk/harness-claude-code@1.0.162`, `@ai-sdk/harness-codex@1.0.160`, `ai@7.0.147`. The newest releases (`harness-claude-code` ≥ 1.0.163, `harness-codex` ≥ 1.0.161) are published without `dist/bridge/pnpm-lock.yaml`, which their bootstrap reads, so session creation fails with `ENOENT`. Re-check this before upgrading.
 5. **Approval continuation.** A `tool-approval-response` must be sent together with the assistant message containing the original `tool-approval-request`, or `HarnessAgent` rejects it.
+6. **Native tool filtering is not configuration isolation.** The pinned Codex adapter filters four native tools, while Codex can independently load MCP servers and other capabilities. An empty `mcp_servers` table does not clear inherited entries. Separate runtime configuration/working directories and explicit capability settings prevent those sources from bypassing the host tool policy.
 
 These limits did not justify switching to the native Claude Agent SDK or Codex SDK: everything the workflow needs works through `HarnessAgent` once tools are host-executed. If you want Codex's own OS sandbox (read-only Landlock/seatbelt) and its full shell, a native `@openai/codex-sdk` backend behind `AgentBackend` is the natural next step.
 
@@ -233,7 +238,9 @@ Verified with real providers (Claude Code subscription and Codex ChatGPT login, 
 - Interactive prompts, driven through a pseudo-terminal.
 - In every run the fixture's `git status` stayed clean.
 
-Not exercised against real providers: a run where a `--check` command actually executed (the agents chose not to run the permitted `bun test`), the time limit (covered only by the fake-agent test), and API-key (non-subscription) authentication.
+Additional review verification (2026-10-26): a real Claude Code author / Codex reviewer run using the isolated runtime configuration found a planted arithmetic error, revised and verified the plan, executed the permitted `bun test` twice successfully, and ended `review_complete` in 34 seconds. The input plan and fixture working tree remained unchanged. A separate real CLI interruption during startup exited 130 and preserved plan v0 and a cancellation report.
+
+Deterministic regression tests also cover protected Git history/blob access, external diff helpers, startup cancellation, process descendants that ignore SIGTERM, failed report writes, partial transcripts, severity escalation during deduplication, invalid CLI input, and edits to existing untracked files. API-key (non-subscription) authentication and a real-provider run reaching the time limit remain untested.
 
 Real smoke test (uses both providers and spends tokens):
 
@@ -247,6 +254,6 @@ crosscheck plan PLAN.md --repo . --rounds 2 \
 - The agents' repository access is crosscheck's tool set, not each agent's native toolbox. They cannot run arbitrary read-only commands such as `ls -R` or `rg --type`, only the `--check` commands you permit.
 - `--check` commands run unsandboxed as your user; tests that write caches or snapshots can modify the working tree (crosscheck warns if that happens).
 - The local sandbox shim depends on an experimental interface; pinned versions are required.
-- The adapters install their runtimes into `~/.ai-sdk-harness/`, and the bundled Codex CLI shares `~/.codex` with your own Codex (it may refresh `models_cache.json`).
-- Duplicate detection is conservative text similarity plus the reviewer's own `duplicate_of`; heavily reworded restatements can still appear as new findings.
+- The adapters install their runtimes into `~/.ai-sdk-harness/`. Host login credentials may be refreshed by the adapters; runtime settings, caches and conversations use temporary configuration directories.
+- Automatic duplicate detection requires matching category, location and problem text. Semantic paraphrases depend on the reviewer's `duplicate_of`; heavily reworded restatements can still appear as new findings.
 - One run at a time per repository is assumed; runs never share state, but concurrent runs share `~/.ai-sdk-harness`.

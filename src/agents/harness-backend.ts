@@ -3,9 +3,10 @@ import { HarnessAgent } from "@ai-sdk/harness/agent";
 import { createClaudeCode } from "@ai-sdk/harness-claude-code";
 import { createCodex } from "@ai-sdk/harness-codex";
 import { Output, type ModelMessage, type ToolSet } from "ai";
+import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { Provider, Usage } from "../types.ts";
+import { EFFORT_LEVELS, type Effort, type Provider, type Usage } from "../types.ts";
 import {
   AgentError,
   type AgentBackend,
@@ -26,17 +27,45 @@ const AUTH_HINTS: Record<Provider, string> = {
 };
 
 /** The Codex adapter hardcodes a default model; prefer the user's own Codex default when set. */
-export async function defaultCodexModel(): Promise<string | undefined> {
+export async function defaultCodexConfig(): Promise<{ model?: string; effort?: Effort }> {
   const home = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
   try {
     const config = Bun.TOML.parse(await Bun.file(path.join(home, "config.toml")).text()) as {
       model?: unknown;
+      model_reasoning_effort?: unknown;
     };
-    return typeof config.model === "string" ? config.model : undefined;
+    return {
+      ...(typeof config.model === "string" ? { model: config.model } : {}),
+      ...(EFFORT_LEVELS.includes(config.model_reasoning_effort as Effort)
+        ? { effort: config.model_reasoning_effort as Effort }
+        : {}),
+    };
   } catch {
-    return undefined;
+    return {};
   }
 }
+
+// The adapter filters only four native tools. Disable the other capability
+// sources explicitly; they must never bypass the host repository tools.
+const CODEX_REVIEW_CONFIG = {
+  features: {
+    apps: false,
+    plugins: false,
+    remote_plugin: false,
+    hooks: false,
+    multi_agent: false,
+    multi_agent_v2: false,
+    browser_use: false,
+    browser_use_external: false,
+    computer_use: false,
+    image_generation: false,
+    shell_snapshot: false,
+    skill_mcp_dependency_install: false,
+    skill_search: false,
+    memories: false,
+    worktrees: false,
+  },
+};
 
 function summarize(value: unknown, max = 300): string {
   const s = typeof value === "string" ? value : JSON.stringify(value);
@@ -63,7 +92,6 @@ function classify(provider: Provider, error: unknown): AgentError {
 }
 
 export interface HarnessBackendOptions {
-  repo: string;
   /** Host-executed tools; the agents' built-in tools are disabled. */
   tools: ToolSet;
 }
@@ -71,16 +99,18 @@ export interface HarnessBackendOptions {
 export function createHarnessBackend(opts: HarnessBackendOptions): AgentBackend {
   return {
     async openSession(spec: SessionSpec): Promise<AgentSession> {
+      spec.signal.throwIfAborted();
       const { provider } = spec.agent;
-      const model =
-        spec.agent.model ?? (provider === "codex" ? await defaultCodexModel() : undefined);
+      const defaults = provider === "codex" ? await defaultCodexConfig() : {};
+      const model = spec.agent.model ?? defaults.model;
       const agent = new HarnessAgent({
         harness:
           provider === "claude-code"
             ? createClaudeCode({ startupTimeoutMs: STARTUP_TIMEOUT_MS, effort: spec.agent.effort })
             : createCodex({
                 startupTimeoutMs: STARTUP_TIMEOUT_MS,
-                reasoningEffort: spec.agent.effort,
+                reasoningEffort: spec.agent.effort ?? defaults.effort,
+                codexConfig: CODEX_REVIEW_CONFIG,
               }),
         ...(model ? { model } : {}),
         instructions: spec.instructions,
@@ -97,19 +127,34 @@ export function createHarnessBackend(opts: HarnessBackendOptions): AgentBackend 
 
       let sandbox: HarnessV1NetworkSandboxSession | undefined;
       let session: Awaited<ReturnType<typeof agent.createSession>> | undefined;
+      let runtimeDir: string | undefined;
       spec.onActivity?.({ kind: "status", message: `starting ${provider} runtime` });
       try {
+        // Never inherit project settings, MCP servers, hooks, plugins, or
+        // other conversations. The adapters discover host credentials before
+        // spawning; only their child processes use these empty config dirs.
+        runtimeDir = await mkdtemp(path.join(os.tmpdir(), "crosscheck-runtime-"));
+        await mkdir(path.join(runtimeDir, "codex"));
+        await mkdir(path.join(runtimeDir, "claude"));
         sandbox = await createLocalNetworkSandboxSession({
-          workDir: opts.repo,
+          workDir: runtimeDir,
           port: await freePort(),
+          env: {
+            CODEX_HOME: path.join(runtimeDir, "codex"),
+            CLAUDE_CONFIG_DIR: path.join(runtimeDir, "claude"),
+          },
         });
-        session = await agent.createSession({ sandboxSession: sandbox });
+        session = await agent.createSession({ sandboxSession: sandbox, abortSignal: spec.signal });
+        spec.signal.throwIfAborted();
       } catch (e) {
         await sandbox?.destroy();
+        if (runtimeDir) await rm(runtimeDir, { recursive: true, force: true });
+        if (spec.signal.aborted) throw spec.signal.reason;
         throw classify(provider, e);
       }
       const live = session;
       const liveSandbox = sandbox;
+      const liveRuntimeDir = runtimeDir;
 
       return {
         async send(prompt: string, signal: AbortSignal): Promise<TurnResult> {
@@ -256,11 +301,11 @@ export function createHarnessBackend(opts: HarnessBackendOptions): AgentBackend 
           }
         },
         async close() {
-          try {
-            await live.destroy();
-          } finally {
-            await liveSandbox.destroy();
-          }
+          // Stop local processes even if the bridge's shutdown request hangs.
+          await Promise.allSettled([
+            liveSandbox.destroy().then(() => rm(liveRuntimeDir, { recursive: true, force: true })),
+            live.destroy(),
+          ]);
         },
       };
     },
