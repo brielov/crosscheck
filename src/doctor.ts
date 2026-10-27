@@ -6,6 +6,7 @@ import path from "node:path";
 import pkg from "../package.json";
 import { defaultCodexConfig } from "./agents/harness-backend.ts";
 import { spawnProcess } from "./agents/process.ts";
+import { checkLogin } from "./logins.ts";
 import { checkAgent, defaultModel, loadCatalog } from "./models.ts";
 import type { Provider } from "./types.ts";
 
@@ -84,75 +85,14 @@ async function checkBridgeFiles(): Promise<DoctorCheck> {
   }
 }
 
-const has = (...names: string[]) => names.find((n) => process.env[n]);
-
-async function checkClaudeAuth(): Promise<DoctorCheck> {
-  const name = "claude-code credentials";
-  const env = has(
-    "CLAUDE_CODE_OAUTH_TOKEN",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
-    "AI_GATEWAY_API_KEY",
-  );
-  if (env) return { name, status: "ok", detail: `$${env}` };
-  const configDir = process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
-  const file = path.join(configDir, ".credentials.json");
-  try {
-    const creds = (await Bun.file(file).json()) as { claudeAiOauth?: { accessToken?: unknown } };
-    if (typeof creds.claudeAiOauth?.accessToken === "string")
-      return { name, status: "ok", detail: `subscription login (${file})` };
-  } catch {}
-  if (process.platform === "darwin" && !process.env.CLAUDE_CONFIG_DIR) {
-    // Only checks that the item exists; never reads the secret.
-    const r = await output([
-      "security",
-      "find-generic-password",
-      "-s",
-      "Claude Code-credentials",
-      "-a",
-      process.env.USER ?? "",
-    ]);
-    if (r.code === 0) return { name, status: "ok", detail: "subscription login (macOS Keychain)" };
-  }
+/** The same login check a run makes before it starts; it spends no tokens. */
+async function checkCredentials(provider: Provider): Promise<DoctorCheck> {
+  const c = await checkLogin(provider);
   return {
-    name,
-    status: "fail",
-    detail: "no login or API key found",
-    hint: "Run `claude` and use /login, or export ANTHROPIC_API_KEY.",
-  };
-}
-
-async function checkCodexAuth(): Promise<DoctorCheck> {
-  const name = "codex credentials";
-  const env = has("CODEX_API_KEY", "OPENAI_API_KEY", "AI_GATEWAY_API_KEY");
-  if (env) return { name, status: "ok", detail: `$${env}` };
-  const home = process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
-  const file = path.join(home, "auth.json");
-  try {
-    const auth = (await Bun.file(file).json()) as {
-      OPENAI_API_KEY?: unknown;
-      tokens?: { access_token?: unknown };
-    };
-    if (typeof auth.tokens?.access_token === "string")
-      return { name, status: "ok", detail: `ChatGPT login (${file})` };
-    if (typeof auth.OPENAI_API_KEY === "string" && auth.OPENAI_API_KEY)
-      return { name, status: "ok", detail: `API key (${file})` };
-  } catch {}
-  try {
-    const config = Bun.TOML.parse(await Bun.file(path.join(home, "config.toml")).text()) as {
-      cli_auth_credentials_store?: unknown;
-    };
-    if (
-      config.cli_auth_credentials_store === "keyring" ||
-      config.cli_auth_credentials_store === "auto"
-    )
-      return { name, status: "warn", detail: "credentials are in the OS keyring (not verified)" };
-  } catch {}
-  return {
-    name,
-    status: "fail",
-    detail: "no login or API key found",
-    hint: "Run `codex login`, or export OPENAI_API_KEY.",
+    name: `${provider} credentials`,
+    status: c.status,
+    detail: c.detail,
+    ...(c.hint ? { hint: c.hint } : {}),
   };
 }
 
@@ -233,8 +173,8 @@ export async function runDoctorChecks(): Promise<DoctorCheck[]> {
     checkTool("git", ["git", "--version"], "Install git."),
     checkTool("bash", ["bash", "--version"], "Install bash."),
     checkBridgeFiles(),
-    checkClaudeAuth(),
-    checkCodexAuth(),
+    checkCredentials("claude-code"),
+    checkCredentials("codex"),
     checkCodexDefaults(),
     checkRuntimes(),
     checkModels("claude-code"),

@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-10-27
+
+### Added
+
+- Both agents' logins are checked before any conversation starts, using requests that spend no tokens: Anthropic's and OpenAI's model lists, and Codex's usage-limit lookup for ChatGPT logins. A missing or rejected login stops the run (or resume) within seconds instead of after the other agent's turn. crosscheck also warns when a login token will expire before the run's time limit, or when the Codex plan's usage limit is reached. `crosscheck doctor` uses the same checks, so it now verifies logins instead of only finding them.
+
+### Fixed
+
+- A long run on a Claude subscription could end in `error` with `HTTP 401: authentication_failed`. The adapter gives each session the login token current when the session starts, so a turn running past the token's expiry was rejected. crosscheck now retries a turn once in a fresh session when its login is rejected, which picks up the refreshed login. The run continues instead of failing, though the retried turn starts over. The README explains how to avoid this with a long-lived `claude setup-token` token.
+
 ## [0.3.3] - 2026-10-27
 
 ### Added
@@ -75,7 +85,8 @@ All notable changes to this project are documented here. The format follows
 - `crosscheck doctor` preflight checks.
 - Standalone executables for Linux and macOS (x64, arm64) and a Homebrew tap.
 
-[Unreleased]: https://github.com/brielov/crosscheck/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/brielov/crosscheck/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/brielov/crosscheck/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/brielov/crosscheck/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/brielov/crosscheck/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/brielov/crosscheck/compare/v0.3.0...v0.3.1

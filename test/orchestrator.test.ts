@@ -539,6 +539,62 @@ describe("budgets, cancellation and failures", () => {
     expect(await Bun.file(store.path("report.md")).text()).toContain("Cancelled");
   });
 
+  test("a login rejected mid-turn is retried once in a fresh session", async () => {
+    const expired = () =>
+      new AgentError("claude-code: HTTP 401: authentication_failed", "log in", true);
+    const { state, fake, store } = await run({
+      reviewer: [
+        review({ new_findings: [finding()] }),
+        review({ verdicts: [verdict("F1", "verified")] }),
+        review(),
+      ],
+      author: [
+        expired(),
+        author({ responses: [response("F1", "accept")], revised_plan: REVISED }),
+        author(),
+      ],
+    });
+    expect(state.status).toBe("review_complete");
+    // The failed session was closed and the same prompt went to a new one.
+    expect(fake.opened.slice(0, 3)).toEqual(["reviewer", "author", "author"]);
+    expect(fake.closed).toContain("author");
+    expect(fake.prompts.author[1]).toBe(fake.prompts.author[0]!);
+    expect(await Bun.file(store.path("events.jsonl")).text()).toContain('"type":"auth-retry"');
+  });
+
+  test("a login that fails again after the retry ends the run with the fix", async () => {
+    const expired = () =>
+      new AgentError("claude-code: HTTP 401: authentication_failed", "log in", true);
+    const { state, fake } = await run({
+      reviewer: [review({ new_findings: [finding()] })],
+      author: [expired(), expired()],
+    });
+    expect(state.status).toBe("error");
+    expect(state.error?.hint).toBe("log in");
+    expect(fake.prompts.author).toHaveLength(2);
+  });
+
+  test("a rejected login during a correction retries from the original prompt", async () => {
+    const expired = () => new AgentError("claude-code: HTTP 401", "log in", true);
+    const bad = { output: { summary: "x" } };
+    const { state, fake } = await run({
+      reviewer: [
+        review({ new_findings: [finding()] }),
+        review({ verdicts: [verdict("F1", "verified")] }),
+        review(),
+      ],
+      author: [
+        bad,
+        expired(),
+        author({ responses: [response("F1", "accept")], revised_plan: REVISED }),
+        author(),
+      ],
+    });
+    expect(state.status).toBe("review_complete");
+    expect(fake.prompts.author[1]).toContain("could not be accepted");
+    expect(fake.prompts.author[2]).toBe(fake.prompts.author[0]!);
+  });
+
   test("an agent failure keeps completed work and reports the fix", async () => {
     const { state, findings, store } = await run({
       reviewer: [review({ new_findings: [finding()] })],

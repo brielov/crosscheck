@@ -73,6 +73,8 @@ crosscheck drives the Claude Code and Codex agents, so it needs:
 
 - **Node.js 20+ and git** on your `PATH`. The agent bridges run with `node`; the Homebrew formula installs it for you.
 - **Accounts:** a Claude subscription login (`claude`, then `/login`) or `ANTHROPIC_API_KEY`, and a ChatGPT login (`codex login`) or `OPENAI_API_KEY`. crosscheck uses the credentials those CLIs already store and never writes them to its run files.
+- **Login checks:** before any agent starts, crosscheck checks both logins with requests that spend no tokens. It uses Anthropic's and OpenAI's model lists, or Codex's own usage-limit lookup for a ChatGPT login. A missing or rejected login stops the run right away instead of after another agent's turn. It also warns when a login token expires before the run's time limit, or when your Codex plan's usage limit is reached. `crosscheck doctor` runs the same checks.
+- **Long runs on a Claude subscription:** each agent session starts with your current login token, and those tokens expire every few hours. If one expires mid-turn, crosscheck retries that turn once in a fresh session, which loses the work the turn had done. To avoid that entirely, create a long-lived token with `claude setup-token` and export it as `CLAUDE_CODE_OAUTH_TOKEN` before running crosscheck.
 - **About 1.6 GB of disk and a network connection on the first run.** The pinned Claude Code and Codex runtimes are downloaded once into `~/.ai-sdk-harness/` and reused.
 
 Check everything with:
@@ -194,6 +196,7 @@ The design and its trade-offs are covered in [docs/design.md](docs/design.md). R
 - Agents investigate through crosscheck's tools, not their native toolboxes, so they can't run ad-hoc commands such as `rg` or `ls -R`.
 - `--check` commands run as you, without a sandbox. Only allow commands you trust in that repository.
 - The agent adapters are experimental. crosscheck pins exact versions and needs deliberate upgrades.
+- A Claude subscription login is handed to each session as it starts and isn't refreshed mid-turn. A rejected login costs a retried turn (see Setup for the long-lived token that avoids it).
 - Linux and macOS only.
 
 ## Documentation

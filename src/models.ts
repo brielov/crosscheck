@@ -266,6 +266,56 @@ async function codexModels(binary: string, timeoutMs: number): Promise<ModelInfo
   );
 }
 
+/**
+ * The Codex account the runtime is logged in to, and whether its plan allows
+ * usage now. Reading the usage limits goes to the server, so a rejected login
+ * throws. Starts no thread and spends no tokens.
+ */
+export async function codexAccount(
+  binary: string,
+  options: { env: Record<string, string | undefined>; timeoutMs: number },
+): Promise<{
+  account: { type: string; planType?: string } | null;
+  usageAllowed?: boolean;
+  resetsAt?: number;
+}> {
+  return converse(
+    [binary, "app-server"],
+    { cwd: os.tmpdir(), env: options.env, timeoutMs: options.timeoutMs },
+    async (send, receive) => {
+      let id = 0;
+      const call = async (method: string, params: unknown) => {
+        const requestId = ++id;
+        send({ jsonrpc: "2.0", id: requestId, method, params });
+        const reply = await receive((m) => m.id === requestId);
+        if (reply.error)
+          throw new Error(String((reply.error as Message).message ?? JSON.stringify(reply.error)));
+        return reply.result as Message;
+      };
+      await call("initialize", { clientInfo: { name: "crosscheck", version: "0" } });
+      send({ jsonrpc: "2.0", method: "initialized" });
+      const read = (await call("account/read", { refreshToken: false })).account as Message | null;
+      if (!read) return { account: null };
+      const account = {
+        type: String(read.type),
+        ...(typeof read.planType === "string" ? { planType: read.planType } : {}),
+      };
+      // Usage limits exist only for ChatGPT plans.
+      if (account.type !== "chatgpt") return { account };
+      const limits = await call("account/rateLimits/read", {});
+      const resetsAt = ((limits.rateLimits as Message | undefined)?.primary as Message | undefined)
+        ?.resetsAt;
+      return {
+        account,
+        ...(typeof limits.ordinaryUsageAllowed === "boolean"
+          ? { usageAllowed: limits.ordinaryUsageAllowed }
+          : {}),
+        ...(typeof resetsAt === "number" ? { resetsAt: resetsAt * 1000 } : {}),
+      };
+    },
+  );
+}
+
 /** Asks the runtime for its models. Throws when the runtime is missing or does not answer. */
 export async function listModels(
   provider: Provider,

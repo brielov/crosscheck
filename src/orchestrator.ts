@@ -363,7 +363,11 @@ export async function runReview(deps: RunDeps): Promise<RunState> {
     await Promise.race([s.close().catch(() => {}), Bun.sleep(15_000)]);
   }
 
-  /** Run a turn and validate it; allow MAX_CORRECTIONS correction turns before failing. */
+  /**
+   * Run a turn and validate it. A login rejected mid-turn usually means the
+   * token the session started with has expired; a new session picks up the
+   * refreshed login, so the turn is retried once from its original prompt.
+   */
   async function ask<T>(
     role: Role,
     prompt: string,
@@ -371,6 +375,32 @@ export async function runReview(deps: RunDeps): Promise<RunState> {
     check: (out: T, toolCalls: number) => string[],
   ): Promise<T> {
     activeRole = role;
+    try {
+      return await askOnce(role, prompt, schema, check);
+    } catch (e) {
+      if (!(e instanceof AgentError && e.authFailure) || signal.aborted) throw e;
+      emit({
+        type: "note",
+        message: `${labels[role]} login was rejected mid-turn; retrying the turn in a fresh session`,
+      });
+      await store.append("events.jsonl", {
+        type: "auth-retry",
+        agent: labels[role],
+        round: state.round,
+        error: e.message,
+      });
+      await resetSession(role);
+      return await askOnce(role, prompt, schema, check);
+    }
+  }
+
+  /** Run a turn and validate it; allow MAX_CORRECTIONS correction turns before failing. */
+  async function askOnce<T>(
+    role: Role,
+    prompt: string,
+    schema: z.ZodType<T>,
+    check: (out: T, toolCalls: number) => string[],
+  ): Promise<T> {
     const s = await session(role);
     let toolCalls = 0;
     let errors: string[] = [];

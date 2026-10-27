@@ -59,6 +59,8 @@ export class AgentError extends Error {
   constructor(
     message: string,
     readonly hint?: string,
+    /** The runtime rejected its login, which a fresh session may fix (e.g. an expired token). */
+    readonly authFailure = false,
   ) {
     super(message);
   }

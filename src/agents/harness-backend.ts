@@ -23,7 +23,7 @@ const MAX_APPROVAL_DENIALS = 5;
 
 const AUTH_HINTS: Record<Provider, string> = {
   "claude-code":
-    "Authenticate Claude Code: run `claude` and use /login (subscription), or export ANTHROPIC_API_KEY.",
+    "Authenticate Claude Code: run `claude` and use /login (subscription), or export ANTHROPIC_API_KEY. For long runs, `claude setup-token` creates a token that does not expire mid-run; export it as CLAUDE_CODE_OAUTH_TOKEN.",
   codex: "Authenticate Codex: run `codex login` (ChatGPT plan), or export OPENAI_API_KEY.",
 };
 
@@ -81,7 +81,7 @@ function classify(provider: Provider, error: unknown): AgentError {
       message,
     )
   ) {
-    return new AgentError(`${provider}: ${message}`, AUTH_HINTS[provider]);
+    return new AgentError(`${provider}: ${message}`, AUTH_HINTS[provider], true);
   }
   if (/model.*(not supported|not found|does not exist)|model_not_found/i.test(message)) {
     return new AgentError(

@@ -7,6 +7,7 @@ import { createRepoTools } from "./agents/repo-tools.ts";
 import { doctor } from "./doctor.ts";
 import pkg from "../package.json";
 import { Ledger, type Finding } from "./findings.ts";
+import { checkLogin, expiryWarning } from "./logins.ts";
 import { describeModels, listModels } from "./models.ts";
 import {
   DEFAULT_FOCUS,
@@ -83,6 +84,7 @@ fresh sessions when nothing is under discussion, then the author answers and cri
 plan, then the reviewer checks the author's turn. The run completes when a full review by
 both agents finds nothing material left to change.
 Exit codes: 0 review_complete, 2 needs_input, 3 budget_exhausted, 4 stalled, 1 error, 130 cancelled, 64 usage error.
+Both logins are checked before any agent starts, with requests that spend no tokens.
 Results: <repo>/.crosscheck/runs/<run-id>/ (plan.md, report.md, findings.json, transcript.jsonl).`;
 
 function printSummary(state: RunState, findings: Finding[], dir: string) {
@@ -222,6 +224,7 @@ async function main(argv: string[]): Promise<number> {
     return 64;
   }
 
+  if (!(await checkLogins(config))) return 1;
   let store: RunStore;
   try {
     store = await RunStore.create(config.repo);
@@ -266,7 +269,30 @@ async function resume(argv: string[]): Promise<number> {
     return 64;
   }
   const { dir, config, from } = prepared;
+  if (!(await checkLogins(config))) return 1;
   return execute(config, await RunStore.open(dir), verbose, from);
+}
+
+/**
+ * Checks both agents' logins before any conversation, so a rejected login
+ * costs seconds instead of another agent's turn. False: do not start.
+ */
+async function checkLogins(config: RunConfig): Promise<boolean> {
+  const providers = [...new Set([config.author.provider, config.reviewer.provider])];
+  const checks = await Promise.all(providers.map((p) => checkLogin(p)));
+  let ok = true;
+  for (const c of checks) {
+    if (c.status === "fail") {
+      ok = false;
+      process.stderr.write(
+        `crosscheck: ${c.provider} login: ${c.detail}${c.hint ? `\n  ${c.hint}` : ""}\n`,
+      );
+    } else if (c.status === "warn")
+      process.stderr.write(`${yellow("warning:")} ${c.provider} login: ${c.detail}\n`);
+    const expiring = expiryWarning(c, config.timeoutMs);
+    if (expiring) process.stderr.write(`${yellow("warning:")} ${expiring}\n`);
+  }
+  return ok;
 }
 
 /** Runs the review in `store` with progress output, then prints the summary. */
