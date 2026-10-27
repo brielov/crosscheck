@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-27
+
+### Fixed
+
+- A long run could end in `error` over a response that was actually usable:
+  - Codex sometimes writes prose before its JSON answer, which the SDK rejects. crosscheck now recovers the trailing JSON object and still validates it against the schema, so malformed output still can't count as "no findings".
+  - When an agent "accepts in part" and pushes back on the rest, the agent that raised the point can now maintain it (`maintain_dispute`) instead of only marking it `not_resolved`.
+  - Agents get two correction attempts instead of one, and a rejected ruling now says which rulings are valid for that point.
+
 ## [0.3.1] - 2026-10-27
 
 ### Fixed
@@ -60,7 +69,8 @@ All notable changes to this project are documented here. The format follows
 - `crosscheck doctor` preflight checks.
 - Standalone executables for Linux and macOS (x64, arm64) and a Homebrew tap.
 
-[Unreleased]: https://github.com/brielov/crosscheck/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/brielov/crosscheck/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/brielov/crosscheck/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/brielov/crosscheck/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/brielov/crosscheck/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/brielov/crosscheck/compare/v0.2.0...v0.2.1

@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import path from "node:path";
 import { AgentError } from "../src/agents/backend.ts";
 import { MAX_DISPUTE_ROUNDS, type Finding } from "../src/findings.ts";
-import { runReview, type RunState } from "../src/orchestrator.ts";
+import { MAX_CORRECTIONS, runReview, type RunState } from "../src/orchestrator.ts";
 import { nextSteps, type NextStep } from "../src/report.ts";
 import { RunStore } from "../src/store.ts";
 import type { RunConfig } from "../src/types.ts";
@@ -163,6 +163,7 @@ describe("review loop", () => {
         review({ new_findings: [finding()] }),
         review({ verdicts: [verdict("F1", "verified")] }),
         review({ verdicts: [verdict("F1", "verified")] }),
+        review({ verdicts: [verdict("F1", "verified")] }),
       ],
       author: [author({ responses: [response("F1", "dispute", "Tokens are hashed first")] })],
     });
@@ -211,9 +212,9 @@ describe("review loop", () => {
     expect(await Bun.file(store.path("report.md")).text()).toContain("Decisions needed from you");
   });
 
-  test("malformed output gets one correction attempt, then fails the run", async () => {
+  test(`malformed output gets ${MAX_CORRECTIONS} correction attempts, then fails the run`, async () => {
     const bad = { output: { summary: "x", findings: "none" } };
-    const { state, findings, store } = await run({ reviewer: [bad, bad], author: [] });
+    const { state, findings, store } = await run({ reviewer: [bad, bad, bad], author: [] });
     expect(state.status).toBe("error");
     expect(findings).toHaveLength(0);
     const transcript = (await Bun.file(store.path("transcript.jsonl")).text())
@@ -221,7 +222,7 @@ describe("review loop", () => {
       .split("\n")
       .map((line) => JSON.parse(line))
       .filter((entry) => entry.type === "turn-complete");
-    expect(transcript).toHaveLength(2);
+    expect(transcript).toHaveLength(MAX_CORRECTIONS + 1);
     expect(transcript[1]!.prompt).toContain("could not be accepted");
   });
 
@@ -241,7 +242,7 @@ describe("review loop", () => {
 
   test("a full review without repository inspection is not accepted as 'no findings'", async () => {
     const lazy = { ...review(), toolCalls: [] };
-    const { state } = await run({ reviewer: [lazy, lazy], author: [] });
+    const { state } = await run({ reviewer: [lazy, lazy, lazy], author: [] });
     expect(state.status).toBe("error");
     expect(state.reason).toContain("did not inspect the repository");
   });
@@ -401,7 +402,7 @@ describe("budgets, cancellation and failures", () => {
         { name: "run_check", input: { command: "true" }, ok: true, summary: "exit code 0" },
       ],
     };
-    const { state } = await run({ author: [], reviewer: [lazy, lazy] });
+    const { state } = await run({ author: [], reviewer: [lazy, lazy, lazy] });
     expect(state.status).toBe("error");
   });
 

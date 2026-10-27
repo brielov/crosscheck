@@ -63,3 +63,26 @@ export class AgentError extends Error {
     super(message);
   }
 }
+
+/**
+ * The JSON object a response ends with, for runtimes that narrate before
+ * their structured answer. Returns undefined when there is none. The caller
+ * still validates the result against the turn's schema.
+ */
+export function trailingJson(text: string): unknown {
+  const end = text.lastIndexOf("}");
+  if (end < 0) return undefined;
+  // The first opening brace that parses through the last closing brace is the
+  // outermost object; braces in earlier prose fail to parse and are skipped.
+  for (
+    let start = text.indexOf("{");
+    start >= 0 && start < end;
+    start = text.indexOf("{", start + 1)
+  ) {
+    try {
+      const value: unknown = JSON.parse(text.slice(start, end + 1));
+      if (value && typeof value === "object" && !Array.isArray(value)) return value;
+    } catch {}
+  }
+  return undefined;
+}

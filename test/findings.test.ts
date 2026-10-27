@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { trailingJson } from "../src/agents/backend.ts";
 import {
   Ledger,
   LedgerError,
@@ -90,6 +91,23 @@ describe("Ledger", () => {
       "author:addressed",
       "reviewer:verified",
     ]);
+  });
+
+  test("the raiser can hold its point against an accept that only partly agrees", () => {
+    const l = new Ledger();
+    raise(l);
+    l.respond("F1", answer("author", "accept", 1, "Accepted in part; the rest is overkill"));
+    const f = l.verify("F1", rule("reviewer", "maintain_dispute"));
+    expect(f).toMatchObject({ status: "disputed", awaiting: "author", disputeRounds: 1 });
+  });
+
+  test("a ruling that does not fit names the ones that do", () => {
+    const l = new Ledger();
+    raise(l);
+    l.respond("F1", answer("author", "dispute"));
+    expect(l.rulingProblem("F1", "reviewer", "verified")).toContain(
+      "use one of: not_resolved, withdrawn, maintain_dispute, needs_user_decision",
+    );
   });
 
   test("the author's own point closes when the reviewer accepts the change", () => {
@@ -206,6 +224,20 @@ describe("Ledger", () => {
     expect(evaluate(l, { cleanReview: true, failedChecks: ["bun test"] })?.outcome).toBe(
       "needs_input",
     );
+  });
+});
+
+describe("structured output recovery", () => {
+  test("takes the JSON object a response ends with, skipping braces in the prose", () => {
+    const text =
+      'I checked `{ a: 1 }` and the config.\n```json\n{"summary": "ok", "items": [{"x": 1}]}\n```\n';
+    expect(trailingJson(text)).toEqual({ summary: "ok", items: [{ x: 1 }] });
+  });
+
+  test("returns nothing when no complete object is present", () => {
+    expect(trailingJson("No JSON here.")).toBeUndefined();
+    expect(trailingJson('{"summary": "cut off')).toBeUndefined();
+    expect(trailingJson("[1, 2, 3]")).toBeUndefined();
   });
 });
 

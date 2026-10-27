@@ -90,7 +90,8 @@ const RULING_FROM: Record<Ruling, ReadonlySet<FindingStatus>> = {
   verified: new Set(["addressed"]),
   not_resolved: new Set(["addressed", "disputed"]),
   withdrawn: new Set(["open", "addressed", "disputed"]),
-  maintain_dispute: new Set(["disputed"]),
+  // The raiser can also hold its point against an "accept" that only partly agrees.
+  maintain_dispute: new Set(["addressed", "disputed"]),
   needs_user_decision: new Set(["addressed", "disputed"]),
 };
 
@@ -213,10 +214,14 @@ export class Ledger {
     if (verdict === "withdrawn") return null;
     if (f.awaiting !== actor)
       return `${id} is waiting for the ${f.awaiting ?? "user"}, not for your ruling`;
-    if (!RULING_FROM[verdict].has(f.status))
+    if (!RULING_FROM[verdict].has(f.status)) {
+      const valid = (Object.keys(RULING_FROM) as Ruling[])
+        .filter((r) => RULING_FROM[r].has(f.status))
+        .join(", ");
       return verdict === "verified"
-        ? `${id} cannot be "verified" because the other agent did not accept it (status ${f.status}); use withdrawn, maintain_dispute or needs_user_decision`
-        : `${id} is ${f.status}; "${verdict}" does not apply`;
+        ? `${id} cannot be "verified" because the other agent did not accept it (status ${f.status}); use one of: ${valid}`
+        : `${id} is ${f.status}; "${verdict}" does not apply (use one of: ${valid})`;
+    }
     return null;
   }
 

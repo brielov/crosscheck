@@ -34,7 +34,7 @@ import {
 } from "./types.ts";
 
 /** Correction attempts allowed after an agent's output fails validation. */
-export const MAX_CORRECTIONS = 1;
+export const MAX_CORRECTIONS = 2;
 /** Consecutive rounds without any change in the plan or finding statuses before a run counts as stalled. */
 export const STALL_ROUNDS = 2;
 /** Streamed agent text is written to the transcript in chunks of this size or age. */

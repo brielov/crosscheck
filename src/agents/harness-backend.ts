@@ -9,6 +9,7 @@ import path from "node:path";
 import { EFFORT_LEVELS, type Effort, type Provider, type Usage } from "../types.ts";
 import {
   AgentError,
+  trailingJson,
   type AgentBackend,
   type AgentSession,
   type SessionSpec,
@@ -286,6 +287,11 @@ export function createHarnessBackend(opts: HarnessBackendOptions): AgentBackend 
               try {
                 return { text, output: await result.output, usage, toolCalls };
               } catch (e) {
+                // Codex sometimes narrates before its JSON answer, which the
+                // SDK's parser rejects. Recover the answer; the orchestrator
+                // still validates it against the schema.
+                const recovered = trailingJson(text);
+                if (recovered !== undefined) return { text, output: recovered, usage, toolCalls };
                 return {
                   text,
                   output: undefined,
