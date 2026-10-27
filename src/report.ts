@@ -1,8 +1,8 @@
 import path from "node:path";
-import { Ledger, type Finding } from "./findings.ts";
+import { Ledger, otherRole, type Finding } from "./findings.ts";
 import { relativePath, shellQuote, toCommandLine } from "./options.ts";
 import type { RunState } from "./orchestrator.ts";
-import { CLOSED_STATUSES, MATERIAL_SEVERITIES, type Usage } from "./types.ts";
+import { CLOSED_STATUSES, type Usage } from "./types.ts";
 
 const OUTCOME_TEXT: Record<RunState["status"], string> = {
   running: "Run in progress (or interrupted before it could finish)",
@@ -32,7 +32,20 @@ function one(s: string, max = 400): string {
 }
 
 function findingLine(f: Finding, extra?: string): string {
-  return `- **${f.id}** [${f.severity} · ${f.category} · ${f.evidenceType.replace(/_/g, " ")}] ${one(f.title, 160)} — _${f.status}_${extra ? `\n  ${extra}` : ""}`;
+  return `- **${f.id}** [${f.severity} · ${f.category} · ${f.evidenceType.replace(/_/g, " ")} · raised by the ${f.raiser}] ${one(f.title, 160)} — _${f.status}_${extra ? `\n  ${extra}` : ""}`;
+}
+
+/** How a closed point was settled: the last status change says who agreed, and why. */
+function settledBy(f: Finding): string {
+  const last = f.history.at(-1);
+  if (!last) return "";
+  const how =
+    f.status === "withdrawn"
+      ? `Withdrawn by the ${last.actor}`
+      : last.actor === f.raiser
+        ? `Verified by the ${last.actor}`
+        : `Accepted by the ${last.actor}`;
+  return `${how}: ${one(last.note, 500)}`;
 }
 
 export interface NextStep {
@@ -40,8 +53,9 @@ export interface NextStep {
   command?: string;
 }
 
-const isUnresolved = (f: Finding) =>
-  MATERIAL_SEVERITIES.has(f.severity) && !CLOSED_STATUSES.has(f.status) && !Ledger.needsUser(f);
+const isUnresolved = (f: Finding) => f.awaiting != null;
+
+const cap = (s: string) => s[0]!.toUpperCase() + s.slice(1);
 
 const ids = (fs: Finding[]) => fs.map((f) => f.id).join(", ");
 
@@ -103,7 +117,7 @@ export function nextSteps(
         );
       } else if (unresolved.length > 0) {
         steps.push({
-          text: `${ids(unresolved)} ${unresolved.length === 1 ? "is" : "are"} still open (see "Unresolved material findings" in report.md). Fix ${unresolved.length === 1 ? "it" : "them"} in the plan yourself, or let the agents continue${state.status === "budget_exhausted" ? " with more rounds or time (--rounds, --timeout)" : ""}:`,
+          text: `${ids(unresolved)} ${unresolved.length === 1 ? "is" : "are"} still under discussion (see "Points still under discussion" in report.md). Fix ${unresolved.length === 1 ? "it" : "them"} in the plan yourself, or let the agents continue${state.status === "budget_exhausted" ? " with more rounds or time (--rounds, --timeout)" : ""}:`,
           command: rerun(),
         });
       }
@@ -131,11 +145,6 @@ export function nextSteps(
       steps.push({
         text: `The agents relied on ${state.assumptions.length} untested assumption(s), listed under "Verification and evidence" in report.md. Turn the risky ones into spikes or tests before building on them.${state.config.checks.length === 0 ? " Next time, --check '<command>' lets agents run your tests." : ""}`,
       });
-    const lows = findings.filter((f) => f.severity === "low" && !CLOSED_STATUSES.has(f.status));
-    if (lows.length > 0)
-      steps.push({
-        text: `${lows.length} optional low-severity suggestion(s) are in report.md.`,
-      });
   }
   return steps;
 }
@@ -148,7 +157,7 @@ export function renderReport(state: RunState, findings: Finding[], dir: string):
   if (state.error?.hint) out.push(`**Fix:** ${state.error.hint}`, "");
   out.push(
     `- Run: \`${state.id}\` · started ${state.startedAt} · elapsed ${formatDuration(state.elapsedMs)}`,
-    `- Rounds: ${state.round} of max ${state.config.maxRounds} (a round = reviewer pass → author response/revision → reviewer verification)`,
+    `- Rounds: ${state.round} of max ${state.config.maxRounds} (${state.rounds.filter((r) => r.full).length} began with a full review; a round = full review when nothing is under discussion → author's turn → reviewer's check)`,
     `- Repository: \`${state.repo?.root ?? state.config.repo}\`${state.repo?.isGit ? ` · ${state.repo.branch ?? "detached HEAD"} ${state.repo.head ? `@ ${state.repo.head.slice(0, 12)}` : "(no commits yet)"}${state.repo.dirtyPaths ? ` · ${state.repo.dirtyPaths} uncommitted path(s) at start` : ""}` : " · not a git repository"}`,
     `- Author: ${state.agents.author} · Reviewer: ${state.agents.reviewer}`,
     `- Focus: ${state.config.focus.join(", ")}`,
@@ -173,7 +182,7 @@ export function renderReport(state: RunState, findings: Finding[], dir: string):
       `- Original input (unchanged): \`${state.config.input.planPath}\` (copy: \`input/plan.original.md\`)`,
     );
   out.push(
-    "- Findings ledger: `findings.json` · run state: `run.json`",
+    "- Points ledger: `findings.json` · run state: `run.json`",
     "- Agent transcript: `transcript.jsonl` · tool/phase events: `events.jsonl`",
     "",
   );
@@ -194,7 +203,7 @@ export function renderReport(state: RunState, findings: Finding[], dir: string):
           f,
           one(
             f.needsUserDecision ??
-              `Author and reviewer still disagree. Author: ${f.authorResponse?.response ?? "-"} / Reviewer: ${f.verification?.reason ?? "-"}`,
+              `The agents still disagree. ${cap(f.response?.actor ?? otherRole(f.raiser))}: ${f.response?.response ?? "-"} / ${cap(f.raiser)}: ${f.verification?.reason ?? "-"}`,
             800,
           ),
         ),
@@ -205,12 +214,12 @@ export function renderReport(state: RunState, findings: Finding[], dir: string):
 
   const unresolved = findings.filter(isUnresolved);
   if (unresolved.length > 0) {
-    out.push("## Unresolved material findings", "");
+    out.push("## Points still under discussion", "");
     for (const f of unresolved)
       out.push(
         findingLine(
           f,
-          `${one(f.problem)}${f.verification ? ` — reviewer: ${one(f.verification.reason, 300)}` : ""}`,
+          `${one(f.problem)} — waiting for the ${f.awaiting}${f.verification ? `; ${f.raiser}: ${one(f.verification.reason, 300)}` : ""}`,
         ),
       );
     out.push("");
@@ -226,9 +235,10 @@ export function renderReport(state: RunState, findings: Finding[], dir: string):
   if (state.planVersions.length <= 1) out.push("- The plan was not revised.");
   out.push("");
   for (const r of state.rounds) {
-    out.push(`### Round ${r.round}`, "");
-    if (r.reviewerSummary) out.push(`- Reviewer: ${one(r.reviewerSummary, 800)}`);
+    out.push(`### Round ${r.round}${r.full ? " (full review)" : ""}`, "");
+    if (r.reviewSummary) out.push(`- Full review: ${one(r.reviewSummary, 800)}`);
     if (r.authorSummary) out.push(`- Author: ${one(r.authorSummary, 800)}`);
+    if (r.reviewerSummary) out.push(`- Reviewer's check: ${one(r.reviewerSummary, 800)}`);
     out.push(
       `- Raised: ${r.raised.join(", ") || "none"} · Resolved: ${r.resolved.join(", ") || "none"}`,
       "",
@@ -237,22 +247,8 @@ export function renderReport(state: RunState, findings: Finding[], dir: string):
 
   const resolved = findings.filter((f) => CLOSED_STATUSES.has(f.status));
   if (resolved.length > 0) {
-    out.push("## Resolved findings", "");
-    for (const f of resolved) {
-      out.push(
-        findingLine(
-          f,
-          `${f.status === "withdrawn" ? "Withdrawn by reviewer" : "Verified by reviewer"}: ${one(f.verification?.reason ?? "", 500)}`,
-        ),
-      );
-    }
-    out.push("");
-  }
-
-  const lows = findings.filter((f) => f.severity === "low" && !CLOSED_STATUSES.has(f.status));
-  if (lows.length > 0) {
-    out.push("## Remaining low-severity suggestions", "");
-    for (const f of lows) out.push(findingLine(f, one(f.suggestion, 400)));
+    out.push("## Settled points", "");
+    for (const f of resolved) out.push(findingLine(f, settledBy(f)));
     out.push("");
   }
 
@@ -274,7 +270,7 @@ export function renderReport(state: RunState, findings: Finding[], dir: string):
   const byType = (t: Finding["evidenceType"]) =>
     findings.filter((f) => f.evidenceType === t).length;
   out.push(
-    `- Findings by evidence: ${byType("repository_evidence")} backed by repository evidence, ${byType("hypothetical_risk")} hypothetical risk(s), ${byType("missing_requirement")} missing requirement(s).`,
+    `- Points by evidence: ${byType("repository_evidence")} backed by repository evidence, ${byType("hypothetical_risk")} hypothetical risk(s), ${byType("missing_requirement")} missing requirement(s).`,
   );
   if (state.assumptions.length > 0) {
     out.push("", "**Unverified assumptions stated by the agents:**", "");

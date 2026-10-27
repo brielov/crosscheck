@@ -4,62 +4,64 @@ This document explains how crosscheck works and why. For installation and usage,
 
 ## The review loop
 
-The CLI owns the outer workflow. Each agent's harness owns its internal reasoning and tool calls.
+The CLI owns the outer workflow. Each agent's harness owns its internal reasoning and tool calls. The goal is the best plan both agents can agree on, so the loop is a discussion that runs until every point is settled and a fresh look finds nothing material left.
 
 1. Record the brief or plan, constraints, focus areas, configuration and repository revision.
 2. Brief mode only: the author inspects the repository and drafts plan `v0`.
-3. **Round 1:** the reviewer independently reviews the plan and the code. At this point it has seen no author rebuttal.
-4. The author investigates each finding and either accepts it (revising the plan), disputes it with evidence, or marks it `needs_user_decision`.
-5. The reviewer checks the actual revised plan (full text plus a diff) against the author's evidence. It gives a verdict on every finding the author responded to and reports newly introduced problems.
-6. **Later rounds:** the author responds to whatever is still unresolved, and the reviewer verifies again.
+3. Every round has the same shape:
+   - **Full review, when nothing is under discussion.** Both agents start new sessions. The reviewer reads the whole plan and the code, covering every section and focus area, and raises points. It is told which points are already settled so it doesn't repeat them. It can reopen one of its own only with new evidence.
+   - **The author's turn.** The author answers each of the reviewer's points: accept (and revise the plan), dispute with evidence, or `needs_user_decision`. It rules on its own points the reviewer disputed. Then it critiques the plan itself and raises its own points, including problems the reviewer missed or earlier changes it now disagrees with, applying each change in the revision. In a full-review round it reads the whole plan with fresh eyes first.
+   - **The reviewer's check.** The reviewer sees the revised plan (full text plus a diff). It rules on the author's answers to its points, answers the author's own points, and raises problems the revision introduced. It is skipped when nothing waits for it and the plan didn't change.
+4. A round that starts while points are still being discussed skips the full review and continues the discussion in the same sessions.
 
-**Round counting.** A round is a reviewer pass, then the author's response/revision, then reviewer verification. The verification that ends round *n* is the reviewer pass for round *n+1*. With `--rounds 3`, the reviewer runs at most 4 times and the author at most 3 times (plus one draft turn in brief mode). If the initial review raises no material findings, the run completes in round 1 without an author turn.
+**Round counting.** A round is the optional full review, the author's turn, and the reviewer's check. The defaults are 8 rounds and 3 hours, because a thorough run needs at least two full reviews: one that raises points and one that comes back clean.
 
-**Separate conversations.** Each agent keeps its own conversation (a harness session) across rounds. crosscheck passes only the current plan, a diff, the relevant findings and responses, and evidence between them; it never forwards transcripts. Peer feedback is labelled as coming from another agent, and it cannot change the user's requirements, permissions or limits. The author is told never to accept incorrect feedback just to finish. The reviewer is told not to invent objections and to withdraw findings the author shows to be wrong.
+**Separate conversations.** Each agent has its own harness session. Sessions last until the next full review, which starts both agents fresh so neither grades its own earlier work from memory. crosscheck passes only the current plan, a diff, the relevant points and answers, and evidence between them; it never forwards transcripts. Peer feedback is labelled as coming from another agent, and it cannot change the user's requirements, permissions or limits. Both agents are told never to agree just to finish and never to invent objections.
 
-## Findings ledger
+**Effort balance.** When one agent's reasoning effort is two or more levels below the other's, crosscheck warns before the run starts. In practice a much weaker author accepts whatever the reviewer says.
 
-Each finding has a stable ID (`F1`, `F2`, …) assigned by crosscheck, never by an agent. A finding records:
+## Points ledger
 
-- the originating agent;
+Each point has a stable ID (`F1`, `F2`, …) assigned by crosscheck, never by an agent. Either agent can raise one. A point records:
+
+- which agent raised it;
 - category and severity (high, medium or low);
 - the plan section or repository location;
 - the problem or failure scenario;
 - evidence type: `repository_evidence`, `hypothetical_risk` or `missing_requirement`;
 - the evidence and assumptions;
 - a suggested correction, or a question that must be answered;
-- the author's response, and the reviewer's verdict with its evidence.
+- the other agent's latest answer, and the raiser's latest ruling, each with evidence;
+- whose move it is: the author, the reviewer, or nobody (closed, or waiting for you).
 
-Every status change is kept in the finding's history.
+Every status change is kept in the point's history.
 
-| Status | Meaning | Who can set it |
-|---|---|---|
-| `open` | Raised, or the reviewer found the fix insufficient | reviewer |
-| `addressed` | The author accepted and revised; awaiting verification | author |
-| `disputed` | The author disagrees, or a user decision is needed | author or reviewer |
-| `verified` | The reviewer confirmed the revision resolves it (closed) | reviewer only |
-| `withdrawn` | The reviewer retracted it with a reason (closed) | reviewer only |
+| Status | Meaning |
+|---|---|
+| `open` | Raised, or the raiser found the fix insufficient; the other agent must answer |
+| `addressed` | The author accepted a reviewer's point and revised; the reviewer must verify |
+| `disputed` | The other agent disagrees, or a decision is needed from you |
+| `verified` | Closed: the reviewer verified the author's fix, or accepted the author's own change |
+| `withdrawn` | Closed: the agent that raised it retracted it, with a reason |
 
-**Disputes.** The author can never close a finding. When the author disputes one, the reviewer must rule on it:
+**Only the raiser closes a point.** The other agent can accept, dispute or escalate, but never close. A reviewer's point closes when the reviewer verifies the author's fix or withdraws the point. When the author raises a point it has already changed the plan, so the reviewer accepting that change closes it. Otherwise the author withdraws it, reverting the change.
 
-- **withdraw** it, because the author was right;
-- **maintain** it, with its own evidence;
-- **escalate** it as a user decision.
+**Disputes.** When the other agent disputes a point, its raiser must withdraw it, maintain it with evidence, or escalate it as a decision for you. A disputed reviewer point can't be marked `verified`. After three maintained disputes the point goes to you.
 
-The reviewer cannot mark a disputed finding `verified`. A dispute the reviewer maintains twice becomes a decision for you.
+**Every severity counts.** Low-severity points must be settled like any other, so agents are told to raise them only when they want the change.
 
-**Duplicates.** A restatement of an existing finding is merged into the existing ID. The reviewer can declare it with `duplicate_of`, and crosscheck also merges findings whose category, location and problem text match exactly (ignoring case and whitespace). Similar wording at different locations, or with different numeric limits, stays separate. A merge keeps the new evidence, and severity can only go up, so a material issue is never demoted to a suggestion. A closed finding that comes back is reopened under its original ID, with stale responses and dispute counters cleared.
+**Duplicates.** A restatement of an existing point by the same agent is merged into the existing ID. The agent can declare it with `duplicate_of`, and crosscheck also merges points whose category, location and problem text match exactly (ignoring case and whitespace). Similar wording at different locations, or with different numeric limits, stays separate. A merge keeps the new evidence, and severity can only go up, so a material issue is never demoted to a suggestion. A closed point that comes back is reopened under its original ID, with stale answers and dispute counters cleared. One agent can't restate the other's point as its own: it answers that point or raises a separate one.
 
 ## Stopping rules
 
 The outcomes are listed in the [README](../README.md#outcomes). The rules behind them:
 
-- **`review_complete`:** no unresolved high or medium findings, the last reviewer pass raised no new material issue, and the latest result of every verification check that ran passed. Low-severity findings never block completion.
-- **`needs_input`:** every remaining material finding is a dispute that only you can settle (a product decision, or a disagreement the reviewer maintained twice), or a verification check failed.
-- **`stalled`:** two consecutive rounds changed neither the plan nor any finding status.
-- **`budget_exhausted`:** the round or time limit was reached.
+- **`review_complete`:** no point is still under discussion, the most recent full review (by both agents) raised nothing material, no material point has been raised since, and the latest result of every verification check that ran passed.
+- **`needs_input`:** the same, except that some points are waiting for your decision (a product question, or a dispute maintained three times), or a verification check failed.
+- **`stalled`:** two consecutive rounds changed neither the plan nor any point's status.
+- **`budget_exhausted`:** the round or time limit was reached. The reason says whether points were still under discussion or the last full review hadn't come back clean.
 
-The report always lists remaining low-severity suggestions, skipped checks and the agents' unverified assumptions. If no `--check` was permitted, it says runtime behaviour was reasoned about, not tested.
+Agreement alone isn't proof of correctness. The report always lists skipped checks and the agents' unverified assumptions. If no `--check` was permitted, it says runtime behaviour was reasoned about, not tested.
 
 ## Model checks
 
@@ -83,11 +85,12 @@ It uses the pinned runtime in `~/.ai-sdk-harness/`, or the one on `PATH` before 
 
 Both agents return structured output, validated by each runtime's native support (Claude Code `outputFormat`, Codex `outputSchema`). crosscheck then checks the output semantically:
 
-- every listed finding gets exactly one response or verdict, and every ID exists;
-- `verified` is only valid for an `addressed` finding;
-- verdicts and findings carry evidence;
-- a revised plan is complete, with no "…unchanged" elisions;
-- the initial review actually used the repository tools.
+- every point waiting for an agent gets exactly one answer or ruling from it, and every ID exists;
+- an agent answers only the other agent's points and rules only on its own;
+- `verified` is only valid for an `addressed` point;
+- rulings and points carry evidence;
+- a revised plan is complete, with no "…unchanged" elisions, and the author's own points come with that revision;
+- every full review actually used the repository tools.
 
 Invalid output gets one correction turn. If that also fails, the run ends with `error`. Malformed output is never interpreted as "no findings".
 
@@ -119,7 +122,7 @@ Each agent runtime starts in a temporary working directory with empty configurat
 <repo>/.crosscheck/runs/<run-id>/
   run.json            configuration, repository identity (path, branch, commit, credential-free remote), status,
                       outcome, timing, per-agent token usage/cost, checks, plan versions, round log
-  findings.json       the findings ledger
+  findings.json       the points ledger
   plan.md             latest plan version
   plan/v0.md, v1.md … every plan version (v0 = your original or the author's draft)
   input/              config.json, brief.md, constraints.md, plan.original.md (copy of your input)
@@ -127,8 +130,8 @@ Each agent runtime starts in a temporary working directory with empty configurat
                       failed turns
   events.jsonl        phases, tool calls and results, verification checks
   harness.log         diagnostics printed by the agent bridges (shown on the terminal only with --verbose)
-  report.md           outcome and why, what changed, resolved/disputed/unresolved findings, decisions for you,
-                      low-severity suggestions, checks, assumptions, what was examined
+  report.md           outcome and why, next steps, what changed, settled and open points, decisions for you,
+                      checks, assumptions, what was examined
 ```
 
 Everything is written incrementally: JSONL files are appended in order and JSON files are rewritten atomically. An interrupted or failed run keeps its completed work, including partial streamed text. A failed artifact write produces `error`, never a successful exit.
@@ -145,7 +148,7 @@ src/models.ts                 model catalogs from the agent runtimes, typo sugge
 src/doctor.ts                 `crosscheck doctor` preflight checks
 src/progress.ts               terminal status line and milestone log
 src/orchestrator.ts           the review loop, stop rules, persistence calls
-src/findings.ts               findings ledger: IDs, actor-gated status transitions, dedupe
+src/findings.ts               points ledger: IDs, whose move it is, raiser-only closing, dedupe
 src/schemas.ts                agent output schemas + semantic validation
 src/prompts.ts                role instructions and per-turn prompts
 src/store.ts, src/report.ts   run directory and Markdown report

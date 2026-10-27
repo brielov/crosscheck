@@ -6,24 +6,31 @@
 
 **Have two coding agents review a plan against your actual repository.**
 
-You write a plan with one AI, paste it into another for review, and copy the feedback back. crosscheck automates that loop. An **author** agent (Claude Code by default) writes or revises the plan, and a **reviewer** agent (Codex by default) checks it against your code. Both investigate the repository themselves, read-only. crosscheck runs the rounds, tracks every finding until the reviewer has verified or withdrawn it, and stops with an explicit outcome and a report.
+You write a plan with one AI, paste it into another for review, and copy the feedback back. crosscheck automates that loop. An **author** agent (Claude Code by default) writes and revises the plan, and a **reviewer** agent (Codex by default) critiques it against your code. Both investigate the repository themselves, read-only, and both raise points. They discuss each point until they agree on it, or hand it to you. The run finishes only when a full review by both agents, each in a fresh session, finds nothing material left to change. crosscheck stops with an explicit outcome and a report.
 
 ```text
 $ crosscheck plan PLAN.md --focus architecture,correctness,testing \
     --constraints "Single instance, ~50 keys, no new infrastructure; ship this week"
-▸ Round 1 · codex (reviewer): independent review
-  + F1 [high/architecture] The proposed storage and cache conflict with the deployment constraints
-  + F2 [medium/correctness] The plan does not define how a rate-limit rejection becomes HTTP 429
-  + F3 [low/testing] The test plan does not pin down threshold and rejection behavior
-▸ Round 1 · claude-code (author): responding to 3 finding(s)
+▸ Round 1 · codex (reviewer): full review
+  + F1 [high/architecture, reviewer] The proposed storage and cache conflict with the deployment constraints
+  + F2 [medium/correctness, reviewer] The plan does not define how a rate-limit rejection becomes HTTP 429
+▸ Round 1 · claude-code (author): answering 2 point(s) and critiquing the plan
+  + F3 [medium/testing, author] The test plan does not pin down threshold and rejection behavior
   ✎ plan v1 saved .crosscheck/runs/20261026-164111-5548/plan/v1.md
-  ! author accepted 3, disputed 0, asked you to decide 0; plan v0 → v1
-▸ Round 1 · codex (reviewer): verifying revision
+  ! author accepted 1, disputed 1, asked you to decide 0, raised 1 of its own; plan v0 → v1
+▸ Round 1 · codex (reviewer): checking the author's turn
   ✓ F1 verified
-  ✓ F2 verified
   ✓ F3 verified
+▸ Round 2 · claude-code (author): answering 1 point(s) and critiquing the plan
+  ! author accepted 1, disputed 0, asked you to decide 0, raised 0 of its own; plan v1 → v2
+▸ Round 2 · codex (reviewer): checking the author's turn
+  ✓ F2 verified
+▸ Round 3 · codex (reviewer): full review
+  no new points, none settled
+▸ Round 3 · claude-code (author): critiquing the plan
+  no new points, none settled
 
-Outcome: review_complete: no unresolved high/medium findings and the last review raised no new material issues
+Outcome: review_complete: both agents agree on every point, and their last full review found nothing material to change
 
 Next steps:
   1. Review what changed:
@@ -36,7 +43,8 @@ Report:     .crosscheck/runs/20261026-164111-5548/report.md
 ```
 
 - **Grounded in your code.** Both agents read files, search, and inspect git history before making claims. Each finding says whether it rests on repository evidence, is a hypothetical risk, or points at a missing requirement.
-- **Honest disagreement.** The author can dispute feedback, and the reviewer can withdraw a finding. Only the reviewer can close one. Disputes that need your judgment are escalated to you, not papered over.
+- **A real discussion.** Either agent can raise a point, including the author objecting to its own earlier changes. The other agent accepts or disputes it with evidence, and only the agent that raised a point can close it. Every point counts, low-severity ones included. Disputes the agents can't settle, and product decisions, go to you instead of being papered over.
+- **Fresh eyes until nothing is left.** Whenever nothing is under discussion, both agents start new sessions and re-read the whole plan. The run completes only when such a full review raises nothing material.
 - **Your constraints win.** Scale, deadlines, stack and decisions you've already made go to both agents, which are told to avoid complexity you didn't ask for.
 - **Safe by construction.** Neither agent can modify your repository or run commands, except the verification commands you explicitly allow.
 
@@ -113,8 +121,8 @@ You can mix the two:
 | `--repo <dir>` | `.` | Repository both agents inspect |
 | `--focus <list>` | `architecture,security,correctness` | Any of `architecture`, `security`, `performance`, `correctness`, `testing`, `maintainability` |
 | `--constraints`, `--constraints-file` | none | Scale, deadlines, stack, compatibility, decisions already made |
-| `--rounds <n>` | 3 | Maximum review rounds |
-| `--timeout <minutes>` | 60 | Time limit for the whole run |
+| `--rounds <n>` | 8 | Maximum rounds |
+| `--timeout <minutes>` | 180 | Time limit for the whole run |
 | `--author <provider[:model]>` | `claude-code` | `claude-code` or `codex`, optionally with a model or alias, e.g. `claude-code:sonnet` |
 | `--reviewer <provider[:model]>` | `codex` | Same. Roles are interchangeable. |
 | `--effort <level>` | runtime default | Reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`) for both agents, or per role: `author=high,reviewer=max` |
@@ -132,14 +140,16 @@ Every run ends with one of these outcomes, and each has its own exit code for sc
 
 | Outcome | Meaning | Exit |
 |---|---|---|
-| `review_complete` | No unresolved high/medium findings, the last review raised nothing new, and any checks that ran passed | 0 |
-| `needs_input` | What remains needs your decision: a product question, a dispute the agents can't settle, or a failed check | 2 |
+| `review_complete` | Both agents agree on every point, their last full review raised nothing material, and any checks that ran passed | 0 |
+| `needs_input` | The agents agree on everything else, but some points need your decision: a product question, a dispute they couldn't settle after three exchanges, or a failed check | 2 |
 | `budget_exhausted` | The round or time limit was reached | 3 |
-| `stalled` | Two rounds in a row changed neither the plan nor any finding | 4 |
+| `stalled` | Two rounds in a row changed neither the plan nor any point | 4 |
 | `error` | Authentication, agent, tool or output-validation failure | 1 |
 | `cancelled` | You pressed Ctrl-C | 130 |
 
-A round is a reviewer pass, the author's response and revision, then reviewer verification. Agreement alone isn't proof: the report also lists remaining low-severity suggestions, checks that were skipped, and assumptions the agents couldn't verify.
+A round starts with a full review in fresh sessions when nothing is under discussion; otherwise it continues the discussion. In every round the author answers the reviewer's points, rules on its own disputed points, critiques the plan and revises it, and then the reviewer checks that turn. Thorough runs take several rounds, which is why the defaults are 8 rounds and 3 hours. If one agent reasons at a much lower effort than the other, crosscheck warns you: the weaker one tends to give in instead of arguing.
+
+Agreement alone isn't proof: the report also lists checks that were skipped and assumptions the agents couldn't verify.
 
 ### What you get
 
@@ -147,9 +157,9 @@ Each run writes to `<repo>/.crosscheck/runs/<run-id>/`. That directory ignores i
 
 ```text
 plan.md            the latest plan (every version is in plan/v0.md, v1.md, …)
-report.md          outcome and why, what changed, resolved/disputed/open findings,
+report.md          outcome and why, what changed, settled and open points,
                    decisions for you, checks, assumptions, what was examined
-findings.json      the findings ledger
+findings.json      the ledger of points, with who raised each and how it was settled
 transcript.jsonl   every agent turn: prompts, streamed text, tool calls, output, usage
 run.json           configuration, repository revision, timing, token usage and cost
 ```

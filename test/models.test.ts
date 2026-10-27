@@ -10,8 +10,8 @@ import {
   suggestModels,
   type ModelCatalog,
 } from "../src/models.ts";
-import { parseCli, shellQuote, toCommandLine, UsageError } from "../src/options.ts";
-import { detectChecks, findPlans, resolveAgents } from "../src/setup.ts";
+import { DEFAULTS, parseCli, shellQuote, toCommandLine, UsageError } from "../src/options.ts";
+import { detectChecks, effortGap, findPlans, resolveAgents } from "../src/setup.ts";
 import type { RunConfig } from "../src/types.ts";
 
 const CLAUDE_INIT = {
@@ -306,8 +306,8 @@ describe("equivalent command line", () => {
       repo: dir,
       focus: ["architecture", "security", "correctness"],
       constraints: "Single instance; don't add Redis",
-      maxRounds: 3,
-      timeoutMs: 60 * 60_000,
+      maxRounds: DEFAULTS.rounds,
+      timeoutMs: DEFAULTS.timeoutMinutes * 60_000,
       author: { provider: "claude-code", model: "claude-opus-5-5", effort: "high" },
       reviewer: { provider: "codex", model: "gpt-6-astra", effort: "xhigh" },
       checks: ["bun test"],
@@ -330,4 +330,25 @@ describe("equivalent command line", () => {
     if (parsed === "help" || parsed === "version") throw new Error("unexpected");
     expect(parsed.config).toEqual(config);
   });
+});
+
+test("a much weaker author or reviewer is flagged", () => {
+  const gap = effortGap({
+    author: { provider: "claude-code", effort: "medium" },
+    reviewer: { provider: "codex", effort: "max" },
+  });
+  expect(gap).toContain("the author runs at medium effort and the reviewer at max");
+  expect(gap).toContain("--effort max");
+  expect(
+    effortGap({
+      author: { provider: "claude-code", effort: "high" },
+      reviewer: { provider: "codex", effort: "xhigh" },
+    }),
+  ).toBeNull();
+  expect(
+    effortGap({
+      author: { provider: "claude-code" },
+      reviewer: { provider: "codex", effort: "max" },
+    }),
+  ).toBeNull();
 });

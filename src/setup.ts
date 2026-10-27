@@ -146,7 +146,20 @@ export async function resolveAgents(
     }
     resolved[role] = agent;
   }
+  const gap = effortGap(resolved);
+  if (gap) options.warn(gap);
   return resolved;
+}
+
+/** Warns when one agent reasons far less than the other: the weaker side tends to concede. */
+export function effortGap(config: Pick<RunConfig, Role>): string | null {
+  const rank = (role: Role) => EFFORT_LEVELS.indexOf(config[role].effort!);
+  if (!config.author.effort || !config.reviewer.effort) return null;
+  if (Math.abs(rank("author") - rank("reviewer")) < 2) return null;
+  const [weak, strong] = (
+    rank("author") < rank("reviewer") ? ["author", "reviewer"] : ["reviewer", "author"]
+  ) as [Role, Role];
+  return `the ${weak} runs at ${config[weak].effort} effort and the ${strong} at ${config[strong].effort}; a much weaker ${weak} tends to give in instead of arguing (--effort ${config[strong].effort} sets both)`;
 }
 
 const IGNORED_DOCS = new Set([
@@ -478,7 +491,7 @@ export async function wizard(preset: Preset): Promise<RunConfig | null> {
     cancelled(
       await p.select({
         message: "Maximum review rounds",
-        options: [1, 2, 3, 4, 5].map((n) => ({
+        options: [3, 5, 8, 12, 20].map((n) => ({
           value: n,
           label: String(n),
           hint: n === DEFAULTS.rounds ? "default" : "",
@@ -491,7 +504,7 @@ export async function wizard(preset: Preset): Promise<RunConfig | null> {
     cancelled(
       await p.select({
         message: "Time limit",
-        options: [15, 30, 60, 120, 240].map((m) => ({
+        options: [30, 60, 120, 180, 300, 480].map((m) => ({
           value: m * 60_000,
           label: m < 60 ? `${m} min` : `${m / 60} h`,
           hint: m === DEFAULTS.timeoutMinutes ? "default" : "",

@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import path from "node:path";
 import { AgentError } from "../src/agents/backend.ts";
-import type { Finding } from "../src/findings.ts";
+import { MAX_DISPUTE_ROUNDS, type Finding } from "../src/findings.ts";
 import { runReview, type RunState } from "../src/orchestrator.ts";
 import { nextSteps, type NextStep } from "../src/report.ts";
 import { RunStore } from "../src/store.ts";
@@ -40,15 +40,18 @@ async function run(
 const statusOf = (findings: Finding[], id: string) => findings.find((f) => f.id === id)?.status;
 
 describe("review loop", () => {
-  test("complete path: raise → accept/revise → verify, with persisted artifacts", async () => {
-    const { state, findings, store, planPath } = await run({
+  test("complete path: raise → accept/revise → verify, then a clean full review", async () => {
+    const { state, findings, store, planPath, fake } = await run({
       reviewer: [
         review({ new_findings: [finding()] }),
         review({ verdicts: [verdict("F1", "verified")] }),
+        review(),
       ],
-      author: [author({ responses: [response("F1", "accept")], revised_plan: REVISED })],
+      author: [author({ responses: [response("F1", "accept")], revised_plan: REVISED }), author()],
     });
     expect(state.status).toBe("review_complete");
+    expect(state.round).toBe(2);
+    expect(state.rounds.map((r) => r.full)).toEqual([true, true]);
     expect(statusOf(findings, "F1")).toBe("verified");
     expect(state.planVersions.map((v) => v.version)).toEqual([0, 1]);
     expect(await Bun.file(store.path("plan.md")).text()).toBe(REVISED);
@@ -57,28 +60,78 @@ describe("review loop", () => {
     expect(await Bun.file(planPath).text()).toContain("Compare tokens with ===");
     expect(await Bun.file(store.path("report.md")).text()).toContain("Review complete");
     expect((await Bun.file(store.path("run.json")).json()).status).toBe("review_complete");
+    // The second full review ran in fresh sessions for both agents.
+    expect(fake.opened).toEqual(["reviewer", "author", "reviewer", "author"]);
+    expect(fake.prompts.reviewer[2]).toContain("fresh eyes");
+    expect(fake.prompts.author[1]).toContain("new session");
   });
 
-  test("a clean initial review completes without an author turn", async () => {
-    const { state, fake } = await run({ reviewer: [review()], author: [] });
+  test("a clean first review still needs the author's sign-off", async () => {
+    const { state, fake } = await run({ reviewer: [review()], author: [author()] });
     expect(state.status).toBe("review_complete");
-    expect(fake.prompts.author).toHaveLength(0);
+    expect(fake.prompts.author).toHaveLength(1);
+    expect(fake.prompts.author[0]).toContain("Your own critique");
+    // Nothing changed, so the reviewer has nothing to check.
+    expect(fake.prompts.reviewer).toHaveLength(1);
   });
 
-  test("low-severity findings do not block completion and are reported", async () => {
-    const { state, store } = await run({
-      reviewer: [
-        review({ new_findings: [finding({ severity: "low", title: "Name the helper clearly" })] }),
-      ],
-      author: [],
+  test("the author's own objection must be agreed by the reviewer", async () => {
+    const own = finding({
+      category: "architecture",
+      severity: "medium",
+      title: "The cache is not needed",
+      location: "plan §Cache",
+      problem: "One instance with 50 keys does not need Redis",
+      suggestion: "Drop the cache",
+    });
+    const { state, findings, fake } = await run({
+      reviewer: [review(), review({ responses: [response("F1", "accept", "agreed")] }), review()],
+      author: [author({ new_findings: [own], revised_plan: REVISED }), author()],
     });
     expect(state.status).toBe("review_complete");
-    expect(await Bun.file(store.path("report.md")).text()).toContain(
-      "Remaining low-severity suggestions",
-    );
+    expect(findings[0]).toMatchObject({ raiser: "author", status: "verified" });
+    expect(fake.prompts.reviewer[1]).toContain("The author's own points");
+    // A material point in round 1 means another full review was needed.
+    expect(state.round).toBe(2);
   });
 
-  test("an author marking a finding addressed does not close it", async () => {
+  test("the reviewer can dispute the author's point and the author withdraws it", async () => {
+    const own = finding({ category: "architecture", title: "Drop auth", location: "§Auth" });
+    const { state, findings } = await run({
+      reviewer: [
+        review(),
+        review({ responses: [response("F1", "dispute", "Auth is a stated requirement")] }),
+        review(),
+        review(),
+      ],
+      author: [
+        author({ new_findings: [own], revised_plan: REVISED }),
+        author({
+          verdicts: [verdict("F1", "withdrawn", "The reviewer is right")],
+          revised_plan: `${REVISED}\nrestored\n`,
+        }),
+        author(),
+      ],
+    });
+    expect(state.status).toBe("review_complete");
+    expect(findings[0]).toMatchObject({ raiser: "author", status: "withdrawn" });
+  });
+
+  test("low-severity points are discussed until settled", async () => {
+    const { state, findings } = await run({
+      reviewer: [
+        review({ new_findings: [finding({ severity: "low", title: "Name the helper clearly" })] }),
+        review({ verdicts: [verdict("F1", "verified")] }),
+      ],
+      author: [author({ responses: [response("F1", "accept")], revised_plan: REVISED })],
+    });
+    // A full review that raised only low points completes once they are settled.
+    expect(state.status).toBe("review_complete");
+    expect(state.round).toBe(1);
+    expect(statusOf(findings, "F1")).toBe("verified");
+  });
+
+  test("an author marking a point addressed does not close it", async () => {
     const accept = () =>
       author({
         responses: [response("F1", "accept")],
@@ -96,12 +149,15 @@ describe("review loop", () => {
       { maxRounds: 2 },
     );
     expect(state.status).toBe("budget_exhausted");
+    expect(state.reason).toContain("still under discussion");
     expect(statusOf(findings, "F1")).toBe("open");
-    expect(fake.prompts.reviewer).toHaveLength(3); // initial + one verification per round
+    // Round 2 continued the discussion instead of starting a new full review.
+    expect(state.rounds.map((r) => r.full)).toEqual([true, false]);
+    expect(fake.prompts.reviewer).toHaveLength(3);
     expect(fake.prompts.author).toHaveLength(2);
   });
 
-  test("the reviewer cannot verify a finding the author disputed", async () => {
+  test("the reviewer cannot verify a point the author disputed", async () => {
     const { state, findings } = await run({
       reviewer: [
         review({ new_findings: [finding()] }),
@@ -115,32 +171,39 @@ describe("review loop", () => {
     expect(statusOf(findings, "F1")).toBe("disputed");
   });
 
-  test("a maintained dispute ends in needs_input, not success", async () => {
-    const { state, findings } = await run({
-      reviewer: [
-        review({ new_findings: [finding()] }),
-        review({ verdicts: [verdict("F1", "maintain_dispute", "Still compared with ===")] }),
-        review({ verdicts: [verdict("F1", "maintain_dispute", "Still compared with ===")] }),
-      ],
-      author: [
-        author({ responses: [response("F1", "dispute")] }),
-        author({ responses: [response("F1", "dispute")] }),
-      ],
-    });
+  test(`a dispute maintained ${MAX_DISPUTE_ROUNDS} times ends in needs_input, not success`, async () => {
+    const maintain = () =>
+      review({ verdicts: [verdict("F1", "maintain_dispute", "Still compared with ===")] });
+    const dispute = () => author({ responses: [response("F1", "dispute")] });
+    const { state, findings } = await run(
+      {
+        reviewer: [
+          review({ new_findings: [finding()] }),
+          maintain(),
+          maintain(),
+          maintain(),
+          review(),
+        ],
+        author: [dispute(), dispute(), dispute(), author()],
+      },
+      { maxRounds: 5 },
+    );
     expect(state.status).toBe("needs_input");
     expect(statusOf(findings, "F1")).toBe("disputed");
+    expect(state.round).toBe(4);
   });
 
   test("a product decision is preserved for the user", async () => {
     const { state, findings, store } = await run({
       reviewer: [
         review({ new_findings: [finding({ evidence_type: "missing_requirement" })] }),
-        review({ verdicts: [verdict("F1", "needs_user_decision")] }),
+        review(),
       ],
       author: [
         author({
           responses: [response("F1", "needs_user_decision", "Should keys be per-org or per-user?")],
         }),
+        author(),
       ],
     });
     expect(state.status).toBe("needs_input");
@@ -168,21 +231,22 @@ describe("review loop", () => {
         { output: undefined, outputError: "No object generated" },
         review({ new_findings: [finding()] }),
         review({ verdicts: [verdict("F1", "verified")] }),
+        review(),
       ],
-      author: [author({ responses: [response("F1", "accept")], revised_plan: REVISED })],
+      author: [author({ responses: [response("F1", "accept")], revised_plan: REVISED }), author()],
     });
     expect(state.status).toBe("review_complete");
     expect(findings).toHaveLength(1);
   });
 
-  test("an initial review without repository inspection is not accepted as 'no findings'", async () => {
+  test("a full review without repository inspection is not accepted as 'no findings'", async () => {
     const lazy = { ...review(), toolCalls: [] };
     const { state } = await run({ reviewer: [lazy, lazy], author: [] });
     expect(state.status).toBe("error");
     expect(state.reason).toContain("did not inspect the repository");
   });
 
-  test("findings keep stable IDs and restatements are merged across rounds", async () => {
+  test("points keep stable IDs and restatements are merged across rounds", async () => {
     const second = finding({
       category: "correctness",
       severity: "medium",
@@ -202,7 +266,7 @@ describe("review loop", () => {
     const { findings, state } = await run({
       reviewer: [
         review({ new_findings: [finding(), second] }),
-        // Round 1 verification: both still unresolved, the reviewer paraphrases F1
+        // Round 1 check: both still unresolved, the reviewer paraphrases F1
         // and declares a duplicate of F2, and raises one genuinely new issue.
         review({
           verdicts: [verdict("F1", "not_resolved"), verdict("F2", "not_resolved")],
@@ -219,6 +283,7 @@ describe("review loop", () => {
             verdict("F3", "verified"),
           ],
         }),
+        review(),
       ],
       author: [
         author({
@@ -229,6 +294,7 @@ describe("review loop", () => {
           responses: [response("F1", "accept"), response("F2", "accept"), response("F3", "accept")],
           revised_plan: `${REVISED}\nmore\n`,
         }),
+        author(),
       ],
     });
     expect(state.status).toBe("review_complete");
@@ -236,7 +302,7 @@ describe("review loop", () => {
     expect(findings[0]!.title).toBe("Token comparison is not constant time");
     expect(findings[0]!.history.some((h) => h.note.startsWith("Restated"))).toBe(true);
     expect(findings[1]!.history.some((h) => h.note.startsWith("Restated"))).toBe(true);
-    // The verification pass belongs to round 1; only F3 was new in it.
+    // The check belongs to round 1; only F3 was new in it.
     expect(state.rounds[0]!.raised).toEqual(["F1", "F2", "F3"]);
     expect(findings[2]!.raisedInRound).toBe(1);
   });
@@ -248,8 +314,10 @@ describe("review loop", () => {
           review({ new_findings: [finding()] }),
           review({ verdicts: [verdict("F1", "not_resolved")] }),
           review({ verdicts: [verdict("F1", "not_resolved")] }),
+          review({ verdicts: [verdict("F1", "not_resolved")] }),
         ],
         author: [
+          author({ responses: [response("F1", "accept")] }),
           author({ responses: [response("F1", "accept")] }),
           author({ responses: [response("F1", "accept")] }),
         ],
@@ -257,7 +325,7 @@ describe("review loop", () => {
       { maxRounds: 5 },
     );
     expect(state.status).toBe("stalled");
-    expect(state.round).toBe(2);
+    expect(state.round).toBe(3);
   });
 
   test("failed verification checks prevent review_complete", async () => {
@@ -273,7 +341,7 @@ describe("review loop", () => {
           return review();
         },
       ],
-      author: [],
+      author: [author()],
     });
     const state = await runReview({
       config: config(repo, planPath, { checks: ["bun test"] }),
@@ -345,7 +413,7 @@ describe("budgets, cancellation and failures", () => {
       if (name === "report.md") throw new Error("fixture: disk full");
       return writeText(name, text);
     };
-    const fake = fakeBackend({ author: [], reviewer: [review()] });
+    const fake = fakeBackend({ author: [author()], reviewer: [review()] });
     const state = await runReview({
       config: config(repo, planPath),
       store,
@@ -405,6 +473,8 @@ describe("budgets, cancellation and failures", () => {
       createBackend: () => ({
         openSession: async (spec) => ({
           send: async () => {
+            if (spec.role === "author")
+              return { text: "", output: author().output, usage: {}, toolCalls: [] };
             for (const word of ["Reading ", "the ", "plan."])
               spec.onActivity?.({ kind: "text", delta: word });
             spec.onActivity?.({
@@ -491,7 +561,7 @@ describe("budgets, cancellation and failures", () => {
     const { repo } = await tempRepo();
     const store = await RunStore.create(repo);
     const fake = fakeBackend({
-      author: [author({ summary: "drafted", revised_plan: "# Drafted plan\n" })],
+      author: [author({ summary: "drafted", revised_plan: "# Drafted plan\n" }), author()],
       reviewer: [review()],
     });
     const state = await runReview({
@@ -503,6 +573,8 @@ describe("budgets, cancellation and failures", () => {
     expect(await Bun.file(path.join(store.dir, "plan/v0.md")).text()).toBe("# Drafted plan\n");
     expect(await Bun.file(store.path("input/brief.md")).text()).toContain("Add API keys");
     expect(fake.prompts.reviewer[0]).toContain("# Drafted plan");
+    // The author critiques its own draft in a fresh session.
+    expect(fake.opened).toEqual(["author", "reviewer", "author"]);
   });
 });
 
@@ -514,9 +586,11 @@ describe("next steps", () => {
       reviewer: [
         review({ new_findings: [finding()] }),
         review({ verdicts: [verdict("F1", "verified")] }),
+        review(),
       ],
-      author: [author({ responses: [response("F1", "accept")], revised_plan: REVISED })],
+      author: [author({ responses: [response("F1", "accept")], revised_plan: REVISED }), author()],
     });
+    expect(state.status).toBe("review_complete");
     const steps = nextSteps(state, findings, store.dir, state.config.repo);
     const plan = path.relative(state.config.repo, store.path("plan.md"));
     const original = path.relative(state.config.repo, planPath);
@@ -528,7 +602,7 @@ describe("next steps", () => {
   });
 
   test("an unchanged plan has nothing to adopt", async () => {
-    const { state, findings, store } = await run({ reviewer: [review({})], author: [] });
+    const { state, findings, store } = await run({ reviewer: [review()], author: [author()] });
     expect(state.status).toBe("review_complete");
     const steps = texts(nextSteps(state, findings, store.dir, state.config.repo));
     expect(steps).toContain("nothing to copy");
@@ -539,9 +613,12 @@ describe("next steps", () => {
     const { state, findings, store } = await run({
       reviewer: [
         review({ new_findings: [finding({ evidence_type: "missing_requirement" })] }),
-        review({ verdicts: [verdict("F1", "needs_user_decision")] }),
+        review(),
       ],
-      author: [author({ responses: [response("F1", "needs_user_decision", "Per-org keys?")] })],
+      author: [
+        author({ responses: [response("F1", "needs_user_decision", "Per-org keys?")] }),
+        author(),
+      ],
     });
     expect(state.status).toBe("needs_input");
     const steps = nextSteps(state, findings, store.dir, state.config.repo);

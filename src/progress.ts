@@ -43,8 +43,8 @@ export function createProgress(opts: { verbose: boolean; maxRounds: number }) {
 
   const statusLine = () => {
     const c = counts
-      ? `findings ${counts.open} open · ${counts.addressed} addressed · ${counts.disputed} disputed · ${counts.verified + counts.withdrawn} resolved`
-      : "no findings yet";
+      ? `points ${counts.open} open · ${counts.addressed} addressed · ${counts.disputed} disputed · ${counts.verified + counts.withdrawn} settled`
+      : "no points yet";
     const parts = [
       `${cyan(FRAMES[frame % FRAMES.length]!)} ${formatDuration(Date.now() - started)}`,
       round > 0 ? `round ${round}/${opts.maxRounds}` : "setup",
@@ -88,10 +88,10 @@ export function createProgress(opts: { verbose: boolean; maxRounds: number }) {
         case "findings":
           counts = e.counts;
           for (const f of e.raised)
-            log(`  ${yellow("+")} ${f.id} [${f.severity}/${f.category}] ${f.title}`);
+            log(`  ${yellow("+")} ${f.id} [${f.severity}/${f.category}, ${f.raiser}] ${f.title}`);
           for (const f of e.resolved) log(`  ${green("✓")} ${f.id} ${f.status}`);
           if (e.raised.length === 0 && e.resolved.length === 0)
-            log(dim("  no new findings, none resolved"));
+            log(dim("  no new points, none settled"));
           break;
         case "plan":
           log(`  ${green("✎")} plan v${e.version} saved ${dim(e.path)}`);

@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-27
+
+### Changed
+
+- The review is now a real discussion between the two agents, run until they agree on every point. Earlier versions did one review and then only checked the fixes, so a run could finish after a single pass with the author accepting everything.
+  - **Both agents raise points.** Each turn, the author also critiques the plan and raises its own points, including problems the reviewer missed or earlier changes it now disagrees with. The reviewer must accept or dispute each one. Only the agent that raised a point can close it.
+  - **Fresh full reviews.** Whenever nothing is under discussion, both agents start new sessions and re-read the whole plan. A run completes only when such a full review raises nothing material.
+  - **Every point counts.** Low-severity points must be settled too instead of being listed as leftovers. A dispute goes to you after three maintained exchanges instead of two.
+  - **Longer defaults:** 8 rounds and 3 hours (were 3 and 60 minutes). The guided setup offers 3–20 rounds and up to 8 hours.
+  - `findings.json` records which agent raised each point and whose move it is. `authorResponse` is now `response`, with the answering agent in `actor`.
+- crosscheck warns when one agent's reasoning effort is two or more levels below the other's, since the weaker one tends to give in instead of arguing.
+
 ## [0.2.1] - 2026-10-27
 
 ### Added
@@ -42,7 +54,8 @@ All notable changes to this project are documented here. The format follows
 - `crosscheck doctor` preflight checks.
 - Standalone executables for Linux and macOS (x64, arm64) and a Homebrew tap.
 
-[Unreleased]: https://github.com/brielov/crosscheck/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/brielov/crosscheck/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/brielov/crosscheck/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/brielov/crosscheck/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/brielov/crosscheck/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/brielov/crosscheck/releases/tag/v0.1.0

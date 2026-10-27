@@ -8,7 +8,7 @@ import {
   type ToolCallRecord,
   type TurnResult,
 } from "./agents/backend.ts";
-import { Ledger, LedgerError, type Finding } from "./findings.ts";
+import { Ledger, LedgerError, type Finding, type Ruling } from "./findings.ts";
 import * as prompts from "./prompts.ts";
 import { renderReport } from "./report.ts";
 import { repoIdentity, workingTreeSnapshot, type RepoIdentity } from "./repo.ts";
@@ -23,6 +23,7 @@ import {
 } from "./schemas.ts";
 import type { RunStore } from "./store.ts";
 import {
+  CLOSED_STATUSES,
   MATERIAL_SEVERITIES,
   type CheckResult,
   type FindingStatus,
@@ -66,7 +67,12 @@ export interface PlanVersion {
 
 export interface RoundLog {
   round: number;
+  /** Whether the round began with a full review in fresh sessions. */
+  full: boolean;
+  /** The reviewer's full review, when the round had one. */
+  reviewSummary: string | null;
   authorSummary: string | null;
+  /** The reviewer's check of the author's turn. */
   reviewerSummary: string | null;
   raised: string[];
   resolved: string[];
@@ -113,32 +119,32 @@ export function agentLabel(role: Role, config: RunConfig): string {
   return `${a.provider}${a.model ? `:${a.model}` : ""}${a.effort ? ` [${a.effort}]` : ""} (${role})`;
 }
 
-/** Decide whether the loop must stop after a reviewer pass. Null means continue. */
+/**
+ * Decide whether the loop stops after a round. Null means continue. A run
+ * completes only when no point is still being discussed and the latest full
+ * review by both agents raised nothing material.
+ */
 export function evaluate(
   ledger: Ledger,
-  ctx: { newMaterial: number; failedChecks: string[] },
+  ctx: { cleanReview: boolean; failedChecks: string[] },
 ): { outcome: Outcome; reason: string } | null {
-  const unresolved = ledger.unresolvedMaterial();
-  if (unresolved.length === 0 && ctx.newMaterial === 0) {
-    if (ctx.failedChecks.length > 0) {
-      return {
-        outcome: "needs_input",
-        reason: `verification checks failed: ${ctx.failedChecks.join(", ")}`,
-      };
-    }
-    return {
-      outcome: "review_complete",
-      reason:
-        "no unresolved high/medium findings and the last review raised no new material issues",
-    };
-  }
-  if (unresolved.length > 0 && unresolved.every(Ledger.needsUser)) {
+  if (ledger.pending().length > 0 || !ctx.cleanReview) return null;
+  const forUser = ledger.list().filter(Ledger.needsUser);
+  if (forUser.length > 0)
     return {
       outcome: "needs_input",
-      reason: `${unresolved.length} material finding(s) need your decision: ${unresolved.map((f) => f.id).join(", ")}`,
+      reason: `the agents agree on everything else; ${forUser.length} point(s) need your decision: ${forUser.map((f) => f.id).join(", ")}`,
     };
-  }
-  return null;
+  if (ctx.failedChecks.length > 0)
+    return {
+      outcome: "needs_input",
+      reason: `verification checks failed: ${ctx.failedChecks.join(", ")}`,
+    };
+  return {
+    outcome: "review_complete",
+    reason:
+      "both agents agree on every point, and their last full review found nothing material to change",
+  };
 }
 
 function describeTool(call: ToolCallRecord): string {
@@ -216,7 +222,15 @@ export async function runReview(deps: RunDeps): Promise<RunState> {
     let log = state.rounds.find((r) => r.round === round);
     if (!log)
       state.rounds.push(
-        (log = { round, authorSummary: null, reviewerSummary: null, raised: [], resolved: [] }),
+        (log = {
+          round,
+          full: false,
+          reviewSummary: null,
+          authorSummary: null,
+          reviewerSummary: null,
+          raised: [],
+          resolved: [],
+        }),
       );
     return log;
   };
@@ -305,6 +319,14 @@ export async function runReview(deps: RunDeps): Promise<RunState> {
     });
     sessions[role] = created;
     return created;
+  }
+
+  /** Ends a role's session so its next turn starts fresh, without memory of earlier rounds. */
+  async function resetSession(role: Role) {
+    const s = sessions[role];
+    if (!s) return;
+    delete sessions[role];
+    await Promise.race([s.close().catch(() => {}), Bun.sleep(15_000)]);
   }
 
   /** Run a turn and validate it; allow MAX_CORRECTIONS correction turns before failing. */
@@ -430,80 +452,124 @@ export async function runReview(deps: RunDeps): Promise<RunState> {
       if (text.trim()) state.assumptions.push({ agent: labels[role], round: state.round, text });
   }
 
-  async function reviewerPass(
-    kind: "initial" | "verify",
-    prompt: string,
-    mustVerify: string[],
-  ): Promise<number> {
-    phase(kind === "initial" ? "independent review" : "verifying revision", "reviewer");
-    const out: ReviewerOutput = await ask(
-      "reviewer",
-      prompt,
-      reviewerOutputSchema,
-      (o, toolCalls) =>
-        checkReviewerOutput(o, {
-          findings: ledger.list(),
-          mustVerify,
-          toolCalls,
-          initial: kind === "initial",
-        }),
-    );
-    const log = roundLog(state.round);
+  /** Applies one agent's answers, rulings and new points. Returns what changed. */
+  function applyTurn(
+    role: Role,
+    out: Pick<ReviewerOutput, "responses" | "new_findings"> & {
+      verdicts: { id: string; verdict: Ruling; reason: string; evidence: string }[];
+    },
+  ) {
+    const round = state.round;
     const resolved: Finding[] = [];
-    for (const v of out.verdicts) {
-      const f = ledger.verify(v.id, {
-        round: state.round,
-        verdict: v.verdict,
-        reason: v.reason,
-        evidence: v.evidence,
-      });
-      if (f.status === "verified" || f.status === "withdrawn") resolved.push(f);
-    }
+    const closed = (f: Finding) => {
+      if (CLOSED_STATUSES.has(f.status)) resolved.push(f);
+    };
+    for (const r of out.responses)
+      closed(
+        ledger.respond(r.id, {
+          round,
+          actor: role,
+          action: r.action,
+          response: r.response,
+          evidence: r.evidence,
+          planChange: r.plan_change,
+        }),
+      );
+    for (const v of out.verdicts)
+      closed(
+        ledger.verify(v.id, {
+          round,
+          actor: role,
+          verdict: v.verdict,
+          reason: v.reason,
+          evidence: v.evidence,
+        }),
+      );
     const raised: Finding[] = [];
     let newMaterial = 0;
     for (const nf of out.new_findings) {
       const { finding, created, reopened } = ledger.raise(
-        state.round,
-        labels.reviewer,
+        round,
+        role,
+        labels[role],
         toNewFinding(nf),
       );
       if (created) raised.push(finding);
-      // A closed material finding that came back counts as a new material issue.
+      // A closed material point that came back counts as a new material issue.
       if ((created || reopened) && MATERIAL_SEVERITIES.has(finding.severity)) newMaterial += 1;
     }
-    log.reviewerSummary = out.summary;
+    const log = roundLog(round);
     log.raised.push(...raised.map((f) => f.id));
     log.resolved.push(...resolved.map((f) => f.id));
+    emit({ type: "findings", round, raised, resolved, counts: ledger.counts() });
+    return { newMaterial, raised };
+  }
+
+  /** The reviewer reads the whole plan in a fresh session. Returns new material points. */
+  async function fullReview(): Promise<number> {
+    phase("full review", "reviewer");
+    const out: ReviewerOutput = await ask(
+      "reviewer",
+      prompts.fullReviewPrompt({
+        round: state.round,
+        version,
+        plan,
+        focus: config.focus,
+        points: ledger.list(),
+      }),
+      reviewerOutputSchema,
+      (o, toolCalls) =>
+        checkReviewerOutput(o, {
+          ledger,
+          mustRespond: [],
+          mustRule: [],
+          toolCalls,
+          requireInspection: true,
+        }),
+    );
+    const { newMaterial } = applyTurn("reviewer", out);
+    roundLog(state.round).reviewSummary = out.summary;
     recordAssumptions("reviewer", out.assumptions);
-    emit({ type: "findings", round: state.round, raised, resolved, counts: ledger.counts() });
     await persist();
     return newMaterial;
   }
 
-  async function authorPass(): Promise<{
-    responded: Finding[];
+  /** The author answers the reviewer, rules on its own disputed points and critiques the plan. */
+  async function authorPass(fresh: boolean): Promise<{
+    newMaterial: number;
     fromVersion: number;
     summary: string;
   }> {
-    const targets = ledger
-      .list()
-      .filter((f) => f.status === "open" || (f.status === "disputed" && !Ledger.needsUser(f)));
-    phase(`responding to ${targets.length} finding(s)`, "author");
+    const waiting = ledger.awaiting("author");
+    const toAnswer = waiting.filter((f) => f.raiser === "reviewer");
+    const toRule = waiting.filter((f) => f.raiser === "author");
+    phase(
+      waiting.length > 0
+        ? `answering ${waiting.length} point(s) and critiquing the plan`
+        : "critiquing the plan",
+      "author",
+    );
     const out: AuthorOutput = await ask(
       "author",
-      prompts.authorResponsePrompt(state.round, targets, version, plan),
-      authorOutputSchema,
-      (o) => checkAuthorOutput(o, { mustRespond: targets.map((f) => f.id), drafting: false }),
-    );
-    for (const r of out.responses) {
-      ledger.respond(r.id, {
+      prompts.authorTurnPrompt({
         round: state.round,
-        action: r.action,
-        response: r.response,
-        evidence: r.evidence,
-        planChange: r.plan_change,
-      });
-    }
+        fresh,
+        toAnswer,
+        toRule,
+        settled: ledger.list().filter((f) => f.awaiting == null),
+        version,
+        plan,
+      }),
+      authorOutputSchema,
+      (o) =>
+        checkAuthorOutput(o, {
+          ledger,
+          mustRespond: toAnswer.map((f) => f.id),
+          mustRule: toRule.map((f) => f.id),
+          drafting: false,
+        }),
+    );
+    const { newMaterial, raised } = applyTurn("author", out);
     const fromVersion = version;
     if (out.revised_plan != null && out.revised_plan.trim() !== plan.trim()) {
       await savePlan(out.revised_plan, labels.author, out.summary);
@@ -511,12 +577,62 @@ export async function runReview(deps: RunDeps): Promise<RunState> {
     roundLog(state.round).authorSummary = out.summary;
     recordAssumptions("author", out.assumptions);
     const tally = (a: string) => out.responses.filter((r) => r.action === a).length;
+    const kept = out.verdicts.filter((v) => v.verdict === "maintain_dispute").length;
+    const dropped = out.verdicts.filter((v) => v.verdict === "withdrawn").length;
     emit({
       type: "note",
-      message: `author accepted ${tally("accept")}, disputed ${tally("dispute")}, asked you to decide ${tally("needs_user_decision")}; ${fromVersion === version ? "plan unchanged" : `plan v${fromVersion} → v${version}`}`,
+      message: `author accepted ${tally("accept")}, disputed ${tally("dispute")}, asked you to decide ${tally("needs_user_decision")}, raised ${raised.length} of its own${kept + dropped > 0 ? `, kept ${kept} and withdrew ${dropped} of its disputed points` : ""}; ${fromVersion === version ? "plan unchanged" : `plan v${fromVersion} → v${version}`}`,
     });
     await persist();
-    return { responded: targets.map((f) => ledger.get(f.id)!), fromVersion, summary: out.summary };
+    return { newMaterial, fromVersion, summary: out.summary };
+  }
+
+  /** The reviewer rules on the author's answers and answers the author's own points. */
+  async function verifyPass(turn: { fromVersion: number; summary: string }): Promise<number> {
+    const waiting = ledger.awaiting("reviewer");
+    const toRule = waiting.filter((f) => f.raiser === "reviewer");
+    const toAnswer = waiting.filter((f) => f.raiser === "author");
+    phase("checking the author's turn", "reviewer");
+    const diff =
+      turn.fromVersion === version
+        ? null
+        : createTwoFilesPatch(
+            `plan/v${turn.fromVersion}.md`,
+            `plan/v${version}.md`,
+            planTexts[turn.fromVersion] ?? "",
+            plan,
+            "",
+            "",
+            { context: 3 },
+          );
+    const out: ReviewerOutput = await ask(
+      "reviewer",
+      prompts.verificationPrompt({
+        round: state.round,
+        toRule,
+        toAnswer,
+        context: ledger.list().filter(Ledger.needsUser),
+        fromVersion: turn.fromVersion,
+        toVersion: version,
+        diff,
+        plan,
+        authorSummary: turn.summary,
+      }),
+      reviewerOutputSchema,
+      (o, toolCalls) =>
+        checkReviewerOutput(o, {
+          ledger,
+          mustRespond: toAnswer.map((f) => f.id),
+          mustRule: toRule.map((f) => f.id),
+          toolCalls,
+          requireInspection: false,
+        }),
+    );
+    const { newMaterial } = applyTurn("reviewer", out);
+    roundLog(state.round).reviewerSummary = out.summary;
+    recordAssumptions("reviewer", out.assumptions);
+    await persist();
+    return newMaterial;
   }
 
   const failedChecks = () => {
@@ -552,74 +668,61 @@ export async function runReview(deps: RunDeps): Promise<RunState> {
         "author",
         prompts.draftPrompt(),
         authorOutputSchema,
-        (o) => checkAuthorOutput(o, { mustRespond: [], drafting: true }),
+        (o) => checkAuthorOutput(o, { ledger, mustRespond: [], mustRule: [], drafting: true }),
       );
       recordAssumptions("author", out.assumptions);
       await savePlan(out.revised_plan!, labels.author, out.summary);
     }
     await persist();
 
-    state.round = 1;
-    let newMaterial = await reviewerPass("initial", prompts.initialReviewPrompt(version, plan), []);
-    let cycleDone = false;
+    // A round starts with a full review in fresh sessions whenever no point is
+    // still being discussed; otherwise it continues the discussion. Either way
+    // the author takes a turn and the reviewer checks it.
+    let cleanReview = false;
     let unchangedRounds = 0;
     for (;;) {
       signal.throwIfAborted();
-      const decision = evaluate(ledger, { newMaterial, failedChecks: failedChecks() });
+      state.round += 1;
+      const full = ledger.pending().length === 0;
+      roundLog(state.round).full = full;
+      const fingerprint = `${Bun.hash(plan)}|${ledger.fingerprint()}`;
+      let material = 0;
+      if (full) {
+        await resetSession("reviewer");
+        await resetSession("author");
+        material += await fullReview();
+      }
+      const turn = await authorPass(full);
+      material += turn.newMaterial;
+      if (ledger.awaiting("reviewer").length > 0 || turn.fromVersion !== version)
+        material += await verifyPass(turn);
+      if (full) cleanReview = material === 0;
+      else if (material > 0) cleanReview = false;
+
+      const decision = evaluate(ledger, { cleanReview, failedChecks: failedChecks() });
       if (decision) {
         finish(decision.outcome, decision.reason);
         break;
       }
-      if (cycleDone) {
-        if (unchangedRounds >= STALL_ROUNDS) {
-          finish(
-            "stalled",
-            `${unchangedRounds} consecutive rounds changed neither the plan nor any finding status`,
-          );
-          break;
-        }
-        if (state.round >= config.maxRounds) {
-          finish(
-            "budget_exhausted",
-            `reached the limit of ${config.maxRounds} round(s) with material findings unresolved`,
-          );
-          break;
-        }
-        state.round += 1;
-      }
-      const fingerprint = `${Bun.hash(plan)}|${ledger.fingerprint()}`;
-      const { responded, fromVersion, summary } = await authorPass();
-      const diff =
-        fromVersion === version
-          ? null
-          : createTwoFilesPatch(
-              `plan/v${fromVersion}.md`,
-              `plan/v${version}.md`,
-              planTexts[fromVersion] ?? "",
-              plan,
-              "",
-              "",
-              { context: 3 },
-            );
-      const respondedIds = new Set(responded.map((f) => f.id));
-      const context = ledger.unresolvedMaterial().filter((f) => !respondedIds.has(f.id));
-      newMaterial = await reviewerPass(
-        "verify",
-        prompts.verificationPrompt({
-          round: state.round,
-          responded,
-          context,
-          fromVersion,
-          toVersion: version,
-          diff,
-          plan,
-          authorSummary: summary,
-        }),
-        responded.map((f) => f.id),
-      );
       unchangedRounds =
         `${Bun.hash(plan)}|${ledger.fingerprint()}` === fingerprint ? unchangedRounds + 1 : 0;
-      cycleDone = true;
+      if (unchangedRounds >= STALL_ROUNDS) {
+        finish(
+          "stalled",
+          `${unchangedRounds} consecutive rounds changed neither the plan nor any point's status`,
+        );
+        break;
+      }
+      if (state.round >= config.maxRounds) {
+        const pending = ledger.pending().length;
+        finish(
+          "budget_exhausted",
+          pending > 0
+            ? `reached the limit of ${config.maxRounds} round(s) with ${pending} point(s) still under discussion`
+            : `reached the limit of ${config.maxRounds} round(s) before a full review came back clean`,
+        );
+        break;
+      }
     }
   } catch (e) {
     if (deps.signal?.aborted) {

@@ -13,7 +13,12 @@ import {
 } from "./types.ts";
 
 export const DEFAULT_FOCUS: FocusArea[] = ["architecture", "security", "correctness"];
-export const DEFAULTS = { rounds: 3, timeoutMinutes: 60, author: "claude-code", reviewer: "codex" };
+export const DEFAULTS = {
+  rounds: 8,
+  timeoutMinutes: 180,
+  author: "claude-code",
+  reviewer: "codex",
+};
 export const MAX_TIMEOUT_MINUTES = Math.floor(2_147_483_647 / 60_000);
 
 /** Invalid command-line input; exits with code 64. */

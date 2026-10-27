@@ -87,6 +87,7 @@ export function review(o: Partial<ReviewerOutput> = {}): Partial<TurnResult> {
     output: {
       summary: "review",
       verdicts: [],
+      responses: [],
       new_findings: [],
       assumptions: [],
       ...o,
@@ -94,11 +95,11 @@ export function review(o: Partial<ReviewerOutput> = {}): Partial<TurnResult> {
   };
 }
 
-export function verdict(
+export function verdict<V extends ReviewerOutput["verdicts"][number]["verdict"]>(
   id: string,
-  v: ReviewerOutput["verdicts"][number]["verdict"],
+  v: V,
   reason = "checked",
-): ReviewerOutput["verdicts"][number] {
+) {
   return { id, verdict: v, reason, evidence: "plan §Auth" };
 }
 
@@ -107,6 +108,8 @@ export function author(o: Partial<AuthorOutput> = {}): Partial<TurnResult> {
     output: {
       summary: "responded",
       responses: [],
+      verdicts: [],
+      new_findings: [],
       revised_plan: null,
       assumptions: [],
       ...o,

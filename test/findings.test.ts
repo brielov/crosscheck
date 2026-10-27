@@ -1,7 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { Ledger, LedgerError, type NewFindingInput } from "../src/findings.ts";
+import {
+  Ledger,
+  LedgerError,
+  MAX_DISPUTE_ROUNDS,
+  type NewFindingInput,
+  type Response,
+  type Ruling,
+} from "../src/findings.ts";
 import { evaluate } from "../src/orchestrator.ts";
 import { checkAuthorOutput, checkReviewerOutput } from "../src/schemas.ts";
+import type { Role } from "../src/types.ts";
 
 const input = (over: Partial<NewFindingInput> = {}): NewFindingInput => ({
   category: "security",
@@ -16,78 +24,65 @@ const input = (over: Partial<NewFindingInput> = {}): NewFindingInput => ({
   duplicateOf: null,
   ...over,
 });
-const accept = {
-  round: 1,
-  action: "accept" as const,
-  response: "fixed",
-  evidence: "",
-  planChange: "hash keys",
-};
-const verdict = (v: Parameters<Ledger["verify"]>[1]["verdict"], round = 1) => ({
+const answer = (
+  actor: Role,
+  action: Response["action"] = "accept",
+  round = 1,
+  response = "fixed",
+): Response => ({ round, actor, action, response, evidence: "", planChange: "hash keys" });
+const rule = (actor: Role, verdict: Ruling, round = 1) => ({
   round,
-  verdict: v,
+  actor,
+  verdict,
   reason: "r",
   evidence: "e",
 });
+const raise = (l: Ledger, over: Partial<NewFindingInput> = {}, raiser: Role = "reviewer") =>
+  l.raise(1, raiser, raiser, input(over));
+const clean = { cleanReview: true, failedChecks: [] };
 
 describe("Ledger", () => {
   test("assigns sequential IDs that never change", () => {
     const l = new Ledger();
-    expect(l.raise(1, "codex", input()).finding.id).toBe("F1");
+    expect(raise(l).finding.id).toBe("F1");
     expect(
-      l.raise(
-        1,
-        "codex",
-        input({
-          category: "performance",
-          title: "N+1 queries",
-          problem: "Usage lookups per request",
-          location: "plan §Limits",
-        }),
-      ).finding.id,
+      raise(l, { title: "N+1 queries", problem: "Lookups per request", location: "§Limits" })
+        .finding.id,
     ).toBe("F2");
     const reloaded = new Ledger(l.toJSON());
     expect(
-      reloaded.raise(
-        2,
-        "codex",
-        input({
-          category: "testing",
-          title: "No tests",
-          problem: "nothing covers limits",
-          location: "plan §Tests",
-        }),
-      ).finding.id,
+      raise(reloaded, { title: "No tests", problem: "nothing", location: "§Tests" }).finding.id,
     ).toBe("F3");
   });
 
-  test("an author response never closes a finding", () => {
+  test("an author answer never closes a reviewer's point", () => {
     const l = new Ledger();
-    l.raise(1, "codex", input());
-    expect(l.respond("F1", accept).status).toBe("addressed");
-    expect(l.unresolvedMaterial().map((f) => f.id)).toEqual(["F1"]);
-    // Addressed findings await the reviewer; the author cannot respond again to close them.
-    expect(() => l.respond("F1", accept)).toThrow(LedgerError);
-    expect(evaluate(l, { newMaterial: 0, failedChecks: [] })).toBeNull();
+    raise(l);
+    expect(l.respond("F1", answer("author")).status).toBe("addressed");
+    expect(l.get("F1")!.awaiting).toBe("reviewer");
+    // Addressed points wait for the reviewer; the author cannot answer again or rule on them.
+    expect(() => l.respond("F1", answer("author"))).toThrow(LedgerError);
+    expect(() => l.verify("F1", rule("author", "verified"))).toThrow(LedgerError);
+    expect(evaluate(l, clean)).toBeNull();
   });
 
-  test("only addressed findings can be verified", () => {
+  test("only the raiser rules, and only accepted points can be verified", () => {
     const l = new Ledger();
-    l.raise(1, "codex", input());
-    expect(() => l.verify("F1", verdict("verified"))).toThrow(LedgerError);
-    l.respond("F1", { ...accept, action: "dispute" });
-    expect(() => l.verify("F1", verdict("verified"))).toThrow(LedgerError);
-    expect(l.verify("F1", verdict("withdrawn")).status).toBe("withdrawn");
-    expect(evaluate(l, { newMaterial: 0, failedChecks: [] })?.outcome).toBe("review_complete");
+    raise(l);
+    expect(() => l.verify("F1", rule("reviewer", "verified"))).toThrow(LedgerError);
+    l.respond("F1", answer("author", "dispute"));
+    expect(() => l.verify("F1", rule("reviewer", "verified"))).toThrow(LedgerError);
+    expect(l.verify("F1", rule("reviewer", "withdrawn")).status).toBe("withdrawn");
+    expect(evaluate(l, clean)?.outcome).toBe("review_complete");
   });
 
-  test("not_resolved reopens; verified closes", () => {
+  test("not_resolved hands the point back; verified closes it", () => {
     const l = new Ledger();
-    l.raise(1, "codex", input());
-    l.respond("F1", accept);
-    expect(l.verify("F1", verdict("not_resolved")).status).toBe("open");
-    l.respond("F1", { ...accept, round: 2 });
-    expect(l.verify("F1", verdict("verified", 2)).status).toBe("verified");
+    raise(l);
+    l.respond("F1", answer("author"));
+    expect(l.verify("F1", rule("reviewer", "not_resolved")).status).toBe("open");
+    l.respond("F1", answer("author", "accept", 2));
+    expect(l.verify("F1", rule("reviewer", "verified", 2)).status).toBe("verified");
     expect(l.get("F1")!.history.map((h) => `${h.actor}:${h.to}`)).toEqual([
       "reviewer:open",
       "author:addressed",
@@ -97,173 +92,214 @@ describe("Ledger", () => {
     ]);
   });
 
-  test("paraphrased restatements merge; a closed finding that returns is reopened", () => {
+  test("the author's own point closes when the reviewer accepts the change", () => {
     const l = new Ledger();
-    l.raise(1, "codex", input());
-    const again = l.raise(2, "codex", input({ title: "Keys are stored in plaintext" }));
+    const { finding } = raise(l, {}, "author");
+    expect(finding).toMatchObject({ raiser: "author", awaiting: "reviewer" });
+    expect(() => l.respond("F1", answer("author"))).toThrow(LedgerError);
+    expect(l.respond("F1", answer("reviewer")).status).toBe("verified");
+    expect(evaluate(l, clean)?.outcome).toBe("review_complete");
+  });
+
+  test("a disputed author point goes back to the author, who can withdraw it", () => {
+    const l = new Ledger();
+    raise(l, {}, "author");
+    l.respond("F1", answer("reviewer", "dispute"));
+    expect(l.get("F1")!.awaiting).toBe("author");
+    expect(l.verify("F1", rule("author", "maintain_dispute")).awaiting).toBe("reviewer");
+    l.respond("F1", answer("reviewer", "dispute", 2));
+    expect(l.verify("F1", rule("author", "withdrawn", 2)).status).toBe("withdrawn");
+  });
+
+  test("paraphrased restatements merge; a closed point that returns is reopened", () => {
+    const l = new Ledger();
+    raise(l);
+    const again = l.raise(2, "reviewer", "r", input({ title: "Keys are stored in plaintext" }));
     expect(again).toMatchObject({ created: false, reopened: false });
     expect(again.finding.id).toBe("F1");
-    l.respond("F1", accept);
-    l.verify("F1", verdict("verified"));
-    const back = l.raise(3, "codex", input({ duplicateOf: "F1", title: "Plaintext keys again" }));
+    l.respond("F1", answer("author"));
+    l.verify("F1", rule("reviewer", "verified"));
+    const back = l.raise(
+      3,
+      "reviewer",
+      "r",
+      input({ duplicateOf: "F1", title: "Plaintext again" }),
+    );
     expect(back).toMatchObject({ created: false, reopened: true });
-    expect(l.get("F1")!.status).toBe("open");
+    expect(l.get("F1")).toMatchObject({ status: "open", awaiting: "author" });
     expect(l.list()).toHaveLength(1);
   });
 
-  test("distinct issues are not merged", () => {
+  test("an agent cannot restate the other agent's point as its own", () => {
     const l = new Ledger();
-    l.raise(1, "codex", input());
-    const other = l.raise(
-      1,
-      "codex",
-      input({
-        title: "Missing rate limit on key creation",
-        problem: "Attackers can mint unlimited keys",
-        location: "plan §API",
-      }),
-    );
-    expect(other.created).toBe(true);
+    raise(l);
+    expect(() => l.raise(1, "author", "a", input({ duplicateOf: "F1" }))).toThrow(LedgerError);
+    // The same wording from the other agent is a separate point, not a merge.
+    expect(l.raise(1, "author", "a", input()).created).toBe(true);
   });
 
-  test("similar findings at different locations or with different limits retain separate IDs", () => {
+  test("similar points at different locations or with different limits keep separate IDs", () => {
     const l = new Ledger();
-    l.raise(1, "reviewer", input({ location: "src/admin.ts:4" }));
-    expect(l.raise(1, "reviewer", input({ location: "src/users.ts:4" })).created).toBe(true);
-    l.raise(
-      1,
-      "reviewer",
-      input({ problem: "The API rejects requests exceeding 1 key per user per hour" }),
-    );
+    raise(l, { location: "src/admin.ts:4" });
+    expect(raise(l, { location: "src/users.ts:4" }).created).toBe(true);
+    raise(l, { problem: "The API rejects requests exceeding 1 key per user per hour" });
     expect(
-      l.raise(
-        1,
-        "reviewer",
-        input({ problem: "The API rejects requests exceeding 2 keys per user per hour" }),
-      ).created,
+      raise(l, { problem: "The API rejects requests exceeding 2 keys per user per hour" }).created,
     ).toBe(true);
     expect(l.list()).toHaveLength(4);
   });
 
-  test("a material restatement upgrades a low finding instead of permitting success", () => {
+  test("a material restatement upgrades a low point", () => {
     const l = new Ledger();
-    l.raise(1, "reviewer", input({ severity: "low" }));
-    l.raise(2, "reviewer", input({ severity: "high", evidence: "new evidence" }));
+    raise(l, { severity: "low" });
+    raise(l, { severity: "high", evidence: "new evidence" });
     expect(l.get("F1")!.severity).toBe("high");
     expect(l.get("F1")!.evidence).toContain("new evidence");
-    expect(evaluate(l, { newMaterial: 0, failedChecks: [] })).toBeNull();
   });
 
-  test("reopening a closed finding clears stale responses and dispute counters", () => {
+  test("reopening a closed point clears stale answers and dispute counters", () => {
     const l = new Ledger();
-    l.raise(1, "reviewer", input());
-    l.respond("F1", { ...accept, action: "dispute" });
-    l.verify("F1", verdict("maintain_dispute"));
-    l.verify("F1", verdict("withdrawn"));
-    l.raise(3, "reviewer", input({ duplicateOf: "F1" }));
+    raise(l);
+    l.respond("F1", answer("author", "dispute"));
+    l.verify("F1", rule("reviewer", "maintain_dispute"));
+    l.verify("F1", rule("reviewer", "withdrawn"));
+    l.raise(3, "reviewer", "r", input({ duplicateOf: "F1" }));
     expect(l.get("F1")).toMatchObject({
       status: "open",
       disputeRounds: 0,
-      authorResponse: null,
+      response: null,
       verification: null,
     });
   });
 
-  test("disputes needing the user produce needs_input", () => {
+  test("low-severity points must be settled too", () => {
     const l = new Ledger();
-    l.raise(1, "codex", input());
-    l.respond("F1", {
-      ...accept,
-      action: "needs_user_decision",
-      response: "Per-org or per-user keys?",
-    });
+    raise(l, { severity: "low" });
+    expect(evaluate(l, clean)).toBeNull();
+  });
+
+  test("a point needing the user ends in needs_input only after a clean full review", () => {
+    const l = new Ledger();
+    raise(l);
+    l.respond("F1", answer("author", "needs_user_decision", 1, "Per-org or per-user keys?"));
     expect(Ledger.needsUser(l.get("F1")!)).toBe(true);
-    expect(evaluate(l, { newMaterial: 0, failedChecks: [] })?.outcome).toBe("needs_input");
+    expect(l.pending()).toHaveLength(0);
+    expect(evaluate(l, { cleanReview: false, failedChecks: [] })).toBeNull();
+    expect(evaluate(l, clean)?.outcome).toBe("needs_input");
   });
 
-  test("a dispute maintained twice needs the user", () => {
+  test(`a dispute maintained ${MAX_DISPUTE_ROUNDS} times goes to the user`, () => {
     const l = new Ledger();
-    l.raise(1, "codex", input());
-    l.respond("F1", { ...accept, action: "dispute" });
-    l.verify("F1", verdict("maintain_dispute"));
-    expect(evaluate(l, { newMaterial: 0, failedChecks: [] })).toBeNull();
-    l.respond("F1", { ...accept, round: 2, action: "dispute" });
-    l.verify("F1", verdict("maintain_dispute", 2));
-    expect(evaluate(l, { newMaterial: 0, failedChecks: [] })?.outcome).toBe("needs_input");
+    raise(l);
+    for (let round = 1; round <= MAX_DISPUTE_ROUNDS; round++) {
+      expect(l.get("F1")!.awaiting).toBe("author");
+      l.respond("F1", answer("author", "dispute", round));
+      l.verify("F1", rule("reviewer", "maintain_dispute", round));
+    }
+    expect(Ledger.needsUser(l.get("F1")!)).toBe(true);
+    expect(evaluate(l, clean)?.outcome).toBe("needs_input");
   });
 
-  test("new material findings block completion even when everything else is closed", () => {
+  test("completion needs a clean full review and passing checks", () => {
     const l = new Ledger();
-    expect(evaluate(l, { newMaterial: 1, failedChecks: [] })).toBeNull();
-    expect(evaluate(l, { newMaterial: 0, failedChecks: ["bun test"] })?.outcome).toBe(
+    expect(evaluate(l, { cleanReview: false, failedChecks: [] })).toBeNull();
+    expect(evaluate(l, { cleanReview: true, failedChecks: ["bun test"] })?.outcome).toBe(
       "needs_input",
     );
   });
 });
 
 describe("output validation", () => {
-  test("reviewer must give a verdict for every finding it was asked to verify", () => {
+  const empty = { summary: "", verdicts: [], responses: [], new_findings: [], assumptions: [] };
+
+  test("the reviewer must rule on every point it was asked about", () => {
     const l = new Ledger();
-    l.raise(1, "codex", input());
-    l.respond("F1", accept);
-    const errors = checkReviewerOutput(
-      { summary: "", verdicts: [], new_findings: [], assumptions: [] },
-      { findings: l.list(), mustVerify: ["F1"], toolCalls: 3, initial: false },
-    );
-    expect(errors).toEqual(["verdicts: missing a verdict for F1"]);
+    raise(l);
+    l.respond("F1", answer("author"));
+    const errors = checkReviewerOutput(empty, {
+      ledger: l,
+      mustRespond: [],
+      mustRule: ["F1"],
+      toolCalls: 3,
+      requireInspection: false,
+    });
+    expect(errors).toEqual(["verdicts: missing a ruling for F1"]);
   });
 
-  test("reviewer cannot reference unknown IDs", () => {
+  test("the reviewer must answer the author's points and cannot rule on them", () => {
+    const l = new Ledger();
+    raise(l, {}, "author");
     const errors = checkReviewerOutput(
+      { ...empty, verdicts: [{ id: "F1", verdict: "verified", reason: "ok", evidence: "e" }] },
+      { ledger: l, mustRespond: ["F1"], mustRule: [], toolCalls: 1, requireInspection: false },
+    );
+    expect(errors).toContain(
+      "verdicts: F1 was raised by the author; answer it under responses instead",
+    );
+    expect(errors).toContain("responses: missing an answer for F1");
+  });
+
+  test("unknown IDs are rejected", () => {
+    const errors = checkReviewerOutput(
+      { ...empty, verdicts: [{ id: "F9", verdict: "withdrawn", reason: "", evidence: "" }] },
       {
-        summary: "",
-        verdicts: [{ id: "F9", verdict: "withdrawn", reason: "", evidence: "" }],
-        new_findings: [],
-        assumptions: [],
+        ledger: new Ledger(),
+        mustRespond: [],
+        mustRule: [],
+        toolCalls: 1,
+        requireInspection: false,
       },
-      { findings: [], mustVerify: [], toolCalls: 1, initial: false },
     );
-    expect(errors[0]).toContain("unknown finding ID F9");
+    expect(errors[0]).toContain("unknown point F9");
   });
 
-  test("author must respond to every finding and return a complete plan", () => {
+  test("the author must answer every point and return a complete plan", () => {
+    const l = new Ledger();
+    raise(l);
+    const author = { ...empty, revised_plan: null as string | null };
+    const ctx = { ledger: l, mustRespond: ["F1"], mustRule: [], drafting: false };
+    expect(checkAuthorOutput(author, ctx)).toEqual(["responses: missing an answer for F1"]);
     expect(
       checkAuthorOutput(
-        { summary: "", responses: [], revised_plan: null, assumptions: [] },
-        { mustRespond: ["F1"], drafting: false },
-      ),
-    ).toEqual(["responses: missing a response for F1"]);
-    expect(
-      checkAuthorOutput(
-        {
-          summary: "",
-          responses: [],
-          revised_plan: "# Plan\n\n## Storage\n...\n",
-          assumptions: [],
-        },
-        { mustRespond: [], drafting: false },
+        { ...author, revised_plan: "# Plan\n\n## Storage\n...\n" },
+        { ...ctx, mustRespond: [] },
       )[0],
     ).toContain("elision");
-    expect(
-      checkAuthorOutput(
-        { summary: "", responses: [], revised_plan: null, assumptions: [] },
-        { mustRespond: [], drafting: true },
-      ),
-    ).toEqual(["revised_plan: the initial plan is required"]);
+    expect(checkAuthorOutput(author, { ...ctx, mustRespond: [], drafting: true })).toEqual([
+      "revised_plan: the initial plan is required",
+    ]);
   });
 
-  test("a reviewer cannot close findings without a reason and evidence", () => {
+  test("the author's own points must come with the plan change", () => {
+    const point = {
+      duplicate_of: null,
+      category: "architecture" as const,
+      severity: "medium" as const,
+      title: "Drop the cache",
+      location: "§Cache",
+      problem: "Not needed at this scale",
+      evidence_type: "missing_requirement" as const,
+      evidence: "constraints",
+      assumptions: "",
+      suggestion: "Remove it",
+    };
+    expect(
+      checkAuthorOutput(
+        { ...empty, new_findings: [point], revised_plan: null },
+        { ledger: new Ledger(), mustRespond: [], mustRule: [], drafting: false },
+      ),
+    ).toEqual([
+      "new_findings: apply the changes your own points propose and return the revised plan",
+    ]);
+  });
+
+  test("closing a point needs a reason and evidence", () => {
     const l = new Ledger();
-    l.raise(1, "reviewer", input());
-    l.respond("F1", accept);
+    raise(l);
+    l.respond("F1", answer("author"));
     const errors = checkReviewerOutput(
-      {
-        summary: "",
-        verdicts: [{ id: "F1", verdict: "verified", reason: "", evidence: "" }],
-        new_findings: [],
-        assumptions: [],
-      },
-      { findings: l.list(), mustVerify: ["F1"], toolCalls: 1, initial: false },
+      { ...empty, verdicts: [{ id: "F1", verdict: "verified", reason: "", evidence: "" }] },
+      { ledger: l, mustRespond: [], mustRule: ["F1"], toolCalls: 1, requireInspection: false },
     );
     expect(errors).toContain("verdicts: F1 requires a reason and evidence");
   });

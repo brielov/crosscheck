@@ -22,7 +22,8 @@ bun run build                # standalone binary for this machine in dist/<os>-<
 
 The tests cover:
 
-- **Findings rules:** the author cannot close a finding. Disputes, needs-user decisions, failed checks, and malformed or uninspected output never yield success.
+- **Points rules:** only the agent that raised a point can close it, and each agent answers only the other's points. Disputes, needs-user decisions, failed checks, unsettled low-severity points, and malformed or uninspected output never yield success.
+- **The discussion:** the author raises and withdraws its own points, a full review in fresh sessions follows each settled discussion, and a run completes only after a clean full review.
 - **Stopping:** round limits, timeouts, stalls and cancellation stop correctly.
 - **Stable IDs:** IDs stay stable, and restatements merge across rounds.
 - **Durability:** partial results and transcripts survive failures and interruption.
@@ -41,7 +42,7 @@ crosscheck plan PLAN.md --repo . --rounds 2 \
   --effort medium --check "bun test" --verbose
 ```
 
-Verified with real providers (Claude Code subscription and Codex ChatGPT login, on a small Bun + SQLite fixture):
+Verified with real providers (Claude Code subscription and Codex ChatGPT login, on a small Bun + SQLite fixture). Most of this list predates the 0.3.0 discussion loop. That loop was checked with Sonnet as author and gpt-6-luna as reviewer, both at medium effort, capped at 6 rounds: the author raised its own point and the reviewer accepted it, fresh full reviews in rounds 1, 5 and 6 each found new issues, and the run ended `budget_exhausted` with one low-severity point still under discussion.
 
 - **Plan mode.** The reviewer found the planted flaws: Postgres and Redis against a single-instance SQLite constraint, no 429 path out of `authenticate()`, manual-only testing. The author revised, the reviewer verified, and the run ended `review_complete`.
 - **Disputes and escalation.**

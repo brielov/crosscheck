@@ -67,7 +67,10 @@ Options:
   -h, --help                   Show help
   --version                    Show version
 
-A round = reviewer pass → author response/revision → reviewer verification.
+The agents discuss until they agree on every point. A round starts with a full review in
+fresh sessions when nothing is under discussion, then the author answers and critiques the
+plan, then the reviewer checks the author's turn. The run completes when a full review by
+both agents finds nothing material left to change.
 Exit codes: 0 review_complete, 2 needs_input, 3 budget_exhausted, 4 stalled, 1 error, 130 cancelled, 64 usage error.
 Results: <repo>/.crosscheck/runs/<run-id>/ (plan.md, report.md, findings.json, transcript.jsonl).`;
 
@@ -81,13 +84,9 @@ function printSummary(state: RunState, findings: Finding[], dir: string) {
       `  ${yellow("?")} ${f.id} ${f.title}: ${f.needsUserDecision ?? "author and reviewer disagree"}`,
     );
   }
-  const c = { open: 0, addressed: 0, verified: 0, withdrawn: 0, disputed: 0 };
-  for (const f of findings) c[f.status] += 1;
-  const lows = findings.filter(
-    (f) => f.severity === "low" && f.status !== "verified" && f.status !== "withdrawn",
-  ).length;
+  const count = (p: (f: Finding) => boolean) => findings.filter(p).length;
   lines.push(
-    `${bold("Findings:")} ${findings.length} raised · ${c.verified} verified · ${c.withdrawn} withdrawn · ${c.disputed} disputed · ${c.open + c.addressed} unresolved (${lows} low-severity suggestion(s) remain)`,
+    `${bold("Points:")} ${findings.length} raised (${count((f) => f.raiser === "reviewer")} by the reviewer, ${count((f) => f.raiser === "author")} by the author) · ${count((f) => f.status === "verified")} agreed · ${count((f) => f.status === "withdrawn")} withdrawn · ${count(Ledger.needsUser)} for you · ${count((f) => f.awaiting != null)} still under discussion`,
   );
   const last = state.planVersions.at(-1);
   if (last)
