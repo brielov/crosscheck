@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-10-27
+
+### Changed
+
+- The author revises the plan with edits instead of re-sending the whole plan every turn. Each edit replaces one passage copied exactly from the current plan. crosscheck applies the edits all or nothing, and a passage that doesn't match gets a correction turn that names it. On large plans this saves the minutes of output each author turn spent retyping the document. A complete rewrite is still accepted when the author restructures most of the plan.
+
 ## [0.3.4] - 2026-10-27
 
 ### Added
@@ -85,7 +91,8 @@ All notable changes to this project are documented here. The format follows
 - `crosscheck doctor` preflight checks.
 - Standalone executables for Linux and macOS (x64, arm64) and a Homebrew tap.
 
-[Unreleased]: https://github.com/brielov/crosscheck/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/brielov/crosscheck/compare/v0.3.5...HEAD
+[0.3.5]: https://github.com/brielov/crosscheck/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/brielov/crosscheck/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/brielov/crosscheck/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/brielov/crosscheck/compare/v0.3.1...v0.3.2

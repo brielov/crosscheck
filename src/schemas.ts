@@ -77,13 +77,65 @@ export const authorOutputSchema = z.object({
     .array(verdict(["withdrawn", "maintain_dispute", "needs_user_decision"]))
     .describe("One ruling for each of your own points the reviewer disputed."),
   new_findings: newFindingsSchema,
+  plan_edits: z
+    .array(
+      z.object({
+        find: z
+          .string()
+          .describe(
+            "A passage copied exactly from the current plan, long enough to occur only once.",
+          ),
+        replace: z.string().describe("The text that replaces it; empty to delete it."),
+      }),
+    )
+    .describe(
+      "Changes to the current plan, applied in order. Empty when the plan is unchanged or revised_plan is used.",
+    ),
   revised_plan: z
     .string()
     .nullable()
-    .describe("The COMPLETE plan in Markdown when it changed this turn; null when unchanged."),
+    .describe(
+      "The COMPLETE plan in Markdown, only when drafting it or rewriting most of it; otherwise null. Never together with plan_edits.",
+    ),
   assumptions: assumptionsSchema,
 });
 export type AuthorOutput = z.infer<typeof authorOutputSchema>;
+export type PlanEdit = AuthorOutput["plan_edits"][number];
+
+/**
+ * Applies edits in order, all or nothing. Each `find` must occur exactly once
+ * in the plan as it stands after the edits before it.
+ */
+export function applyEdits(
+  plan: string,
+  edits: PlanEdit[],
+): { text: string } | { errors: string[] } {
+  let text = plan;
+  const errors: string[] = [];
+  const quote = (s: string) => JSON.stringify(s.length > 80 ? `${s.slice(0, 80)}…` : s);
+  edits.forEach((e, i) => {
+    if (!e.find) return void errors.push(`plan_edits[${i}]: find is empty`);
+    const at = text.indexOf(e.find);
+    if (at < 0)
+      return void errors.push(
+        `plan_edits[${i}]: ${quote(e.find)} is not in the plan${i > 0 ? " (after the earlier edits)" : ""}; copy the passage exactly from the current plan`,
+      );
+    if (text.indexOf(e.find, at + 1) >= 0)
+      return void errors.push(
+        `plan_edits[${i}]: ${quote(e.find)} occurs more than once; include more of the surrounding text`,
+      );
+    text = text.slice(0, at) + e.replace + text.slice(at + e.find.length);
+  });
+  return errors.length > 0 ? { errors } : { text };
+}
+
+/** The plan after the author's turn, or null when it did not change it. Call after checkAuthorOutput. */
+export function revisedPlan(out: AuthorOutput, plan: string): string | null {
+  if (out.revised_plan != null) return out.revised_plan;
+  if (out.plan_edits.length === 0) return null;
+  const result = applyEdits(plan, out.plan_edits);
+  return "text" in result ? result.text : null;
+}
 
 type Exchange = Pick<ReviewerOutput, "responses" | "new_findings"> & {
   verdicts: { id: string; verdict: Ruling; reason: string; evidence: string }[];
@@ -182,11 +234,36 @@ export function checkReviewerOutput(
 
 export function checkAuthorOutput(
   out: AuthorOutput,
-  ctx: { ledger: Ledger; mustRespond: string[]; mustRule: string[]; drafting: boolean },
+  ctx: {
+    ledger: Ledger;
+    mustRespond: string[];
+    mustRule: string[];
+    drafting: boolean;
+    /** The current plan, which plan_edits apply to. */
+    plan: string;
+  },
 ): string[] {
   const errors = checkExchange(out, { ...ctx, actor: "author" });
   if (ctx.drafting && !out.revised_plan?.trim())
     errors.push("revised_plan: the initial plan is required");
+  if (out.plan_edits.length > 0) {
+    if (ctx.drafting || out.revised_plan != null)
+      errors.push(
+        ctx.drafting
+          ? "plan_edits: leave empty while drafting; return the plan in revised_plan"
+          : "plan_edits: use either plan_edits or revised_plan, not both",
+      );
+    else {
+      const result = applyEdits(ctx.plan, out.plan_edits);
+      if ("errors" in result) errors.push(...result.errors);
+      out.plan_edits.forEach((e, i) => {
+        if (ELISION.test(e.replace))
+          errors.push(
+            `plan_edits[${i}]: replace contains an elision placeholder; write out the text`,
+          );
+      });
+    }
+  }
   if (out.revised_plan != null) {
     if (!out.revised_plan.trim())
       errors.push("revised_plan: use null for an unchanged plan, not an empty string");
@@ -195,9 +272,12 @@ export function checkAuthorOutput(
   }
   if (ctx.drafting && out.new_findings.length > 0)
     errors.push("new_findings: leave empty while drafting; the plan itself is your proposal");
-  if (!ctx.drafting && out.new_findings.length > 0 && out.revised_plan == null)
-    errors.push(
-      "new_findings: apply the changes your own points propose and return the revised plan",
-    );
+  if (
+    !ctx.drafting &&
+    out.new_findings.length > 0 &&
+    out.revised_plan == null &&
+    out.plan_edits.length === 0
+  )
+    errors.push("new_findings: apply the changes your own points propose with plan_edits");
   return errors;
 }

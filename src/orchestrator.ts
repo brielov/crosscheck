@@ -16,6 +16,7 @@ import {
   authorOutputSchema,
   checkAuthorOutput,
   checkReviewerOutput,
+  revisedPlan,
   reviewerOutputSchema,
   toNewFinding,
   type AuthorOutput,
@@ -631,13 +632,14 @@ export async function runReview(deps: RunDeps): Promise<RunState> {
           mustRespond: toAnswer.map((f) => f.id),
           mustRule: toRule.map((f) => f.id),
           drafting: false,
+          plan,
         }),
     );
     const { newMaterial, raised } = applyTurn("author", out);
     const fromVersion = version;
-    if (out.revised_plan != null && out.revised_plan.trim() !== plan.trim()) {
-      await savePlan(out.revised_plan, labels.author, out.summary);
-    }
+    const next = revisedPlan(out, plan);
+    if (next != null && next.trim() !== plan.trim())
+      await savePlan(next, labels.author, out.summary);
     roundLog(state.round).authorSummary = out.summary;
     recordAssumptions("author", out.assumptions);
     const tally = (a: string) => out.responses.filter((r) => r.action === a).length;
@@ -730,7 +732,8 @@ export async function runReview(deps: RunDeps): Promise<RunState> {
         "author",
         prompts.draftPrompt(),
         authorOutputSchema,
-        (o) => checkAuthorOutput(o, { ledger, mustRespond: [], mustRule: [], drafting: true }),
+        (o) =>
+          checkAuthorOutput(o, { ledger, mustRespond: [], mustRule: [], drafting: true, plan: "" }),
       );
       recordAssumptions("author", out.assumptions);
       await savePlan(out.revised_plan!, labels.author, out.summary);

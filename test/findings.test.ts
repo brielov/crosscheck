@@ -9,7 +9,7 @@ import {
   type Ruling,
 } from "../src/findings.ts";
 import { evaluate } from "../src/orchestrator.ts";
-import { checkAuthorOutput, checkReviewerOutput } from "../src/schemas.ts";
+import { applyEdits, checkAuthorOutput, checkReviewerOutput, revisedPlan } from "../src/schemas.ts";
 import type { Role } from "../src/types.ts";
 
 const input = (over: Partial<NewFindingInput> = {}): NewFindingInput => ({
@@ -227,6 +227,63 @@ describe("Ledger", () => {
   });
 });
 
+describe("plan edits", () => {
+  const plan = "# Plan\n\n## Auth\nCompare with ===.\n\n## Tests\nManual.\n";
+
+  test("apply in order, each to the text the earlier edits left", () => {
+    const result = applyEdits(plan, [
+      { find: "Compare with ===.", replace: "Compare with timingSafeEqual." },
+      { find: "timingSafeEqual.", replace: "timingSafeEqual on equal-length buffers." },
+      { find: "\n\n## Tests\nManual.\n", replace: "\n" },
+    ]);
+    expect(result).toEqual({
+      text: "# Plan\n\n## Auth\nCompare with timingSafeEqual on equal-length buffers.\n",
+    });
+  });
+
+  test("a missing or ambiguous passage fails every edit, with the reason", () => {
+    const result = applyEdits(plan, [
+      { find: "Compare with ===.", replace: "x" },
+      { find: "Compare with ==", replace: "y" },
+      { find: "\n\n", replace: "" },
+    ]);
+    expect(result).toEqual({
+      errors: [
+        'plan_edits[1]: "Compare with ==" is not in the plan (after the earlier edits); copy the passage exactly from the current plan',
+        'plan_edits[2]: "\\n\\n" occurs more than once; include more of the surrounding text',
+      ],
+    });
+  });
+
+  test("the author's edits are checked against the current plan", () => {
+    const base = {
+      summary: "",
+      responses: [],
+      verdicts: [],
+      new_findings: [],
+      assumptions: [],
+      revised_plan: null as string | null,
+    };
+    const ctx = { ledger: new Ledger(), mustRespond: [], mustRule: [], drafting: false, plan };
+    expect(
+      checkAuthorOutput({ ...base, plan_edits: [{ find: "Nope", replace: "x" }] }, ctx)[0],
+    ).toContain("is not in the plan");
+    expect(
+      checkAuthorOutput(
+        { ...base, plan_edits: [{ find: "Manual.", replace: "x" }], revised_plan: "# New\n" },
+        ctx,
+      ),
+    ).toEqual(["plan_edits: use either plan_edits or revised_plan, not both"]);
+    expect(
+      checkAuthorOutput({ ...base, plan_edits: [{ find: "Manual.", replace: "...\n" }] }, ctx),
+    ).toEqual(["plan_edits[0]: replace contains an elision placeholder; write out the text"]);
+    const ok = { ...base, plan_edits: [{ find: "Manual.", replace: "bun test covers 429s." }] };
+    expect(checkAuthorOutput(ok, ctx)).toEqual([]);
+    expect(revisedPlan(ok, plan)).toBe(plan.replace("Manual.", "bun test covers 429s."));
+    expect(revisedPlan({ ...base, plan_edits: [] }, plan)).toBeNull();
+  });
+});
+
 describe("structured output recovery", () => {
   test("takes the JSON object a response ends with, skipping braces in the prose", () => {
     const text =
@@ -288,8 +345,8 @@ describe("output validation", () => {
   test("the author must answer every point and return a complete plan", () => {
     const l = new Ledger();
     raise(l);
-    const author = { ...empty, revised_plan: null as string | null };
-    const ctx = { ledger: l, mustRespond: ["F1"], mustRule: [], drafting: false };
+    const author = { ...empty, plan_edits: [], revised_plan: null as string | null };
+    const ctx = { ledger: l, mustRespond: ["F1"], mustRule: [], drafting: false, plan: "# Plan\n" };
     expect(checkAuthorOutput(author, ctx)).toEqual(["responses: missing an answer for F1"]);
     expect(
       checkAuthorOutput(
@@ -317,12 +374,10 @@ describe("output validation", () => {
     };
     expect(
       checkAuthorOutput(
-        { ...empty, new_findings: [point], revised_plan: null },
-        { ledger: new Ledger(), mustRespond: [], mustRule: [], drafting: false },
+        { ...empty, new_findings: [point], plan_edits: [], revised_plan: null },
+        { ledger: new Ledger(), mustRespond: [], mustRule: [], drafting: false, plan: "# Plan\n" },
       ),
-    ).toEqual([
-      "new_findings: apply the changes your own points propose and return the revised plan",
-    ]);
+    ).toEqual(["new_findings: apply the changes your own points propose with plan_edits"]);
   });
 
   test("closing a point needs a reason and evidence", () => {

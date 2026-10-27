@@ -110,6 +110,7 @@ export function author(o: Partial<AuthorOutput> = {}): Partial<TurnResult> {
       responses: [],
       verdicts: [],
       new_findings: [],
+      plan_edits: [],
       revised_plan: null,
       assumptions: [],
       ...o,

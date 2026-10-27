@@ -11,6 +11,7 @@ The CLI owns the outer workflow. Each agent's harness owns its internal reasonin
 3. Every round has the same shape:
    - **Full review, when nothing is under discussion.** Both agents start new sessions. The reviewer reads the whole plan and the code, covering every section and focus area, and raises points. It is told which points are already settled so it doesn't repeat them. It can reopen one of its own only with new evidence.
    - **The author's turn.** The author answers each of the reviewer's points: accept (and revise the plan), dispute with evidence, or `needs_user_decision`. It rules on its own points the reviewer disputed. Then it critiques the plan itself and raises its own points, including problems the reviewer missed or earlier changes it now disagrees with, applying each change in the revision. In a full-review round it reads the whole plan with fresh eyes first.
+   - **Revisions are edits.** The author changes the plan with a list of edits, each replacing one passage it copies exactly from the current plan, instead of re-sending the whole document. crosscheck applies them in order, all or nothing. A passage that doesn't match, or matches more than once, is rejected with the reason and gets a correction turn. A complete rewrite is still allowed when the author restructures most of the plan, and the brief-mode draft is always a complete plan. On a 50 KB plan, retyping it cost minutes of output per author turn.
    - **The reviewer's check.** The reviewer sees the revised plan (full text plus a diff). It rules on the author's answers to its points, answers the author's own points, and raises problems the revision introduced. It is skipped when nothing waits for it and the plan didn't change.
 4. A round that starts while points are still being discussed skips the full review and continues the discussion in the same sessions.
 
@@ -91,7 +92,7 @@ Both agents return structured output, validated by each runtime's native support
 - an agent answers only the other agent's points and rules only on its own;
 - `verified` is only valid for an `addressed` point;
 - rulings and points carry evidence;
-- a revised plan is complete, with no "…unchanged" elisions, and the author's own points come with that revision;
+- every plan edit matches exactly one passage of the current plan, edits and a complete rewrite aren't mixed, neither contains "…unchanged" elisions, and the author's own points come with a change to the plan;
 - every full review actually used the repository tools.
 
 Invalid output gets one correction turn. If that also fails, the run ends with `error`. Malformed output is never interpreted as "no findings".

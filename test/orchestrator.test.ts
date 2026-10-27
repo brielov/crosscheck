@@ -66,6 +66,63 @@ describe("review loop", () => {
     expect(fake.prompts.author[1]).toContain("new session");
   });
 
+  test("the author revises the plan with edits instead of rewriting it", async () => {
+    const { state, store, fake } = await run({
+      reviewer: [
+        review({ new_findings: [finding()] }),
+        review({ verdicts: [verdict("F1", "verified")] }),
+        review(),
+      ],
+      author: [
+        author({
+          responses: [response("F1", "accept")],
+          plan_edits: [
+            {
+              find: "Compare tokens with ===.",
+              replace: "Compare tokens with crypto.timingSafeEqual.",
+            },
+          ],
+        }),
+        author(),
+      ],
+    });
+    expect(state.status).toBe("review_complete");
+    expect(await Bun.file(store.path("plan.md")).text()).toBe(REVISED);
+    expect(state.planVersions.map((v) => v.version)).toEqual([0, 1]);
+    // The reviewer checks the edit as a diff of the full plan.
+    expect(fake.prompts.reviewer[1]).toContain("+Compare tokens with crypto.timingSafeEqual.");
+    expect(fake.prompts.author[0]).toContain("plan_edits");
+  });
+
+  test("an edit that does not match the plan gets a correction turn", async () => {
+    const { state, store, fake } = await run({
+      reviewer: [
+        review({ new_findings: [finding()] }),
+        review({ verdicts: [verdict("F1", "verified")] }),
+        review(),
+      ],
+      author: [
+        author({
+          responses: [response("F1", "accept")],
+          plan_edits: [{ find: "Compare tokens with == ", replace: "x" }],
+        }),
+        author({
+          responses: [response("F1", "accept")],
+          plan_edits: [
+            {
+              find: "Compare tokens with ===.",
+              replace: "Compare tokens with crypto.timingSafeEqual.",
+            },
+          ],
+        }),
+        author(),
+      ],
+    });
+    expect(state.status).toBe("review_complete");
+    expect(fake.prompts.author[1]).toContain("is not in the plan");
+    expect(await Bun.file(store.path("plan.md")).text()).toBe(REVISED);
+  });
+
   test("a clean first review still needs the author's sign-off", async () => {
     const { state, fake } = await run({ reviewer: [review()], author: [author()] });
     expect(state.status).toBe("review_complete");
