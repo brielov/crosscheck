@@ -29,6 +29,7 @@ The tests cover:
 - **Tool policy:** paths, git history and blob access, external diff helpers, and verification commands.
 - **Processes:** process-group cancellation, including descendants that ignore SIGTERM.
 - **Run files:** working-tree snapshots, ordered artifact writes, CLI validation, and `doctor`.
+- **Models and setup:** catalog parsing and the runtime protocols (against fake runtimes), typo suggestions, effort checks, Codex defaults, plan and check detection, and that the printed command line parses back to the same configuration.
 
 ## Real-provider smoke test
 
@@ -51,7 +52,7 @@ Verified with real providers (Claude Code subscription and Codex ChatGPT login, 
 - **Cancellation:**
   - Ctrl-C mid-review exited 130, terminated the bridge processes, recorded `cancelled`, and kept plan v0.
   - An interruption during startup behaved the same way.
-- **Interactive prompts**, driven through a pseudo-terminal.
+- **Interactive prompts**, driven through a pseudo-terminal: the full guided setup, and picking the suggested model after a typo in flag mode.
 - **Standalone binary, fresh install.** The compiled binary ran a full review with an empty `HOME`, so it downloaded and installed both agent runtimes through the embedded `pnpm` shim.
 - **Untested:** API-key (non-subscription) authentication, and a real run reaching the time limit.
 

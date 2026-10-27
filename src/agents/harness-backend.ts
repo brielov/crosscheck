@@ -100,16 +100,16 @@ export function createHarnessBackend(opts: HarnessBackendOptions): AgentBackend 
   return {
     async openSession(spec: SessionSpec): Promise<AgentSession> {
       spec.signal.throwIfAborted();
-      const { provider } = spec.agent;
-      const defaults = provider === "codex" ? await defaultCodexConfig() : {};
-      const model = spec.agent.model ?? defaults.model;
+      // The CLI has already applied the Codex defaults and checked the model
+      // and effort; an unset value here deliberately means the runtime's own.
+      const { provider, model } = spec.agent;
       const agent = new HarnessAgent({
         harness:
           provider === "claude-code"
             ? createClaudeCode({ startupTimeoutMs: STARTUP_TIMEOUT_MS, effort: spec.agent.effort })
             : createCodex({
                 startupTimeoutMs: STARTUP_TIMEOUT_MS,
-                reasoningEffort: spec.agent.effort ?? defaults.effort,
+                reasoningEffort: spec.agent.effort,
                 codexConfig: CODEX_REVIEW_CONFIG,
               }),
         ...(model ? { model } : {}),

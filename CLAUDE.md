@@ -111,3 +111,16 @@ bun --hot ./index.ts
 ```
 
 For more information, read the Bun API docs in `node_modules/bun-types/docs/**.mdx`.
+
+## Releasing a new version
+
+Full details are in `docs/development.md#releasing`.
+
+1. Make sure these pass on `main`: `bun check`, `bun run lint`, `./node_modules/.bin/oxfmt --check src test spike scripts` and `bun test`.
+2. Bump `version` in `package.json`. This is the only place the version lives; `--version` reads it.
+3. In `CHANGELOG.md`, move the `## [Unreleased]` entries into a new `## [x.y.z] - YYYY-MM-DD` section. At the bottom of the file, point the `[Unreleased]` compare link at `vX.Y.Z...HEAD` and add a `[x.y.z]` link to the release. The release notes are taken from this section.
+4. Commit, then tag and push both in one command: `git tag vX.Y.Z && git push origin main vX.Y.Z`.
+5. `.github/workflows/release.yml` refuses a tag that doesn't match `package.json` or has no changelog entry. It builds and smoke-tests the four binaries (`crosscheck-<version>-<os>-<arch>.tar.gz`) and publishes them with `checksums.txt`. Watch it with `gh run watch -R brielov/crosscheck`.
+6. The Homebrew tap (`brielov/homebrew-tap`) regenerates `Formula/crosscheck.rb` within the hour. To update it now, run `gh workflow run update.yml -R brielov/homebrew-tap`; it installs and tests the formula on Linux and macOS before committing. Never edit the generated formula by hand.
+
+Don't rename the release archives or drop `checksums.txt`: the tap's generator depends on both.

@@ -61,6 +61,24 @@ The outcomes are listed in the [README](../README.md#outcomes). The rules behind
 
 The report always lists remaining low-severity suggestions, skipped checks and the agents' unverified assumptions. If no `--check` was permitted, it says runtime behaviour was reasoned about, not tested.
 
+## Model checks
+
+The harness adapters pass the model name through untouched, so a typo used to surface only when that agent first ran, possibly minutes into a run. crosscheck now asks the runtimes directly, without starting a conversation:
+
+- **Codex:** `codex app-server` and its `model/list` request. It runs with your own `CODEX_HOME`, so the list matches your login and plan. Hidden models are accepted but not offered.
+- **Claude Code:** the model table in the `initialize` control response of `claude -p --input-format stream-json`. It runs with an empty config directory. The table doesn't depend on the login. Aliases (`opus`) fold into full ids (`claude-opus-5-5`).
+
+It uses the pinned runtime in `~/.ai-sdk-harness/`, or the one on `PATH` before the first run.
+
+**Unknown models:**
+
+- A model that matches a listed one after normalizing case and punctuation (`opus-5.5`), or is a near-miss spelling of one, is rejected with a suggestion.
+- Claude Code also accepts full ids it no longer lists, so a well-formed `claude-…` id that differs only in its version digits passes with a warning.
+
+**Effort levels** are checked against what the chosen model supports.
+
+**If a list can't be loaded,** crosscheck warns and lets the runtime decide, as before.
+
 ## Output validation
 
 Both agents return structured output, validated by each runtime's native support (Claude Code `outputFormat`, Codex `outputSchema`). crosscheck then checks the output semantically:
@@ -120,7 +138,10 @@ Token counts are the ones each harness reports. Cost appears only when the runti
 ## Architecture
 
 ```text
-src/cli.ts                    argument parsing, interactive prompts, summary, Ctrl-C
+src/cli.ts                    entry point: subcommands, summary, Ctrl-C
+src/options.ts                flag parsing, defaults, the equivalent command line
+src/setup.ts                  guided setup, model/effort resolution against the catalogs
+src/models.ts                 model catalogs from the agent runtimes, typo suggestions
 src/doctor.ts                 `crosscheck doctor` preflight checks
 src/progress.ts               terminal status line and milestone log
 src/orchestrator.ts           the review loop, stop rules, persistence calls

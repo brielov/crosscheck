@@ -66,11 +66,21 @@ Check everything with:
 crosscheck doctor
 ```
 
-It verifies Node, git, both logins and the Codex defaults, and whether the agent runtimes are installed. It starts no agents and spends no tokens.
+It verifies Node, git, both logins, the Codex defaults and the model lists, and whether the agent runtimes are installed. It starts no agents and spends no tokens.
 
 ## Usage
 
-Run `crosscheck` inside a repository for a short interactive setup: what to review, focus areas, constraints and number of rounds. Or pass everything as flags:
+Run `crosscheck` inside a repository and it walks you through the setup:
+
+- **Input:** what to review. It offers the Markdown plans it finds, or takes a brief for the author to turn into a plan.
+- **Agents:** author and reviewer, each a model picked from the lists Claude Code and Codex report for your account, plus a reasoning effort the model supports.
+- **Review settings:** focus areas and constraints.
+- **Checks:** the verification commands the agents may run. It suggests the ones it detects, such as `bun run test`.
+- **Limits:** number of rounds and time limit.
+
+It then shows a summary and the equivalent command line, and asks before starting.
+
+Or pass everything as flags:
 
 ```sh
 # Review an existing plan (the file is never modified)
@@ -83,21 +93,29 @@ crosscheck plan \
   --focus architecture,security
 ```
 
+You can mix the two:
+
+- flags given without a plan or brief fill in their answers, and the setup asks only for the rest;
+- `-i` asks for the rest even when a plan or brief is given.
+
+**Models are checked before anything starts.** crosscheck asks each agent runtime which models and effort levels it accepts. This takes about a second and spends no tokens. A typo such as `--author claude-code:opus-5.5` stops right away with `Did you mean claude-opus-5-5?`. In a terminal, you pick from the list instead. `crosscheck models` prints both lists.
+
 | Flag | Default | Meaning |
 |---|---|---|
-| `<PLAN.md>`, `--brief`, `--brief-file` | one is required | Review an existing plan, or have the author draft one from a brief |
+| `<PLAN.md>`, `--brief`, `--brief-file` | asked for | Review an existing plan, or have the author draft one from a brief |
 | `--repo <dir>` | `.` | Repository both agents inspect |
 | `--focus <list>` | `architecture,security,correctness` | Any of `architecture`, `security`, `performance`, `correctness`, `testing`, `maintainability` |
 | `--constraints`, `--constraints-file` | none | Scale, deadlines, stack, compatibility, decisions already made |
 | `--rounds <n>` | 3 | Maximum review rounds |
 | `--timeout <minutes>` | 60 | Time limit for the whole run |
-| `--author <provider[:model]>` | `claude-code` | `claude-code` or `codex`, optionally with a model, e.g. `claude-code:claude-sonnet-5-5` |
+| `--author <provider[:model]>` | `claude-code` | `claude-code` or `codex`, optionally with a model or alias, e.g. `claude-code:sonnet` |
 | `--reviewer <provider[:model]>` | `codex` | Same. Roles are interchangeable. |
 | `--effort <level>` | runtime default | Reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`) for both agents, or per role: `author=high,reviewer=max` |
 | `--check <command>` | none | A verification command the agents may run, such as `"bun test"`. Exact match; repeatable. |
+| `-i`, `--interactive` | off | Ask for the remaining settings even when a plan or brief is given |
 | `--verbose` | off | Stream agent text and tool calls to the terminal |
 
-Defaults: Claude Code uses your account's default model. For Codex, crosscheck takes `model` and `model_reasoning_effort` from `~/.codex/config.toml`, because the adapter's built-in default model isn't available on every plan.
+Defaults: Claude Code uses your account's default model. For Codex, crosscheck takes `model` and `model_reasoning_effort` from `~/.codex/config.toml`. Without them it uses your account's default Codex model, because the adapter's built-in default isn't available on every plan.
 
 While it runs, a status line shows the round, the active agent, its phase, finding counts and elapsed time. Press **Ctrl-C** to cancel: agents are stopped and partial results are saved. Press it again to force quit.
 

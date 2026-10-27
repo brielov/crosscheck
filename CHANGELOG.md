@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-26
+
+### Added
+
+- Guided setup. Running `crosscheck` in a terminal asks for the input, author and reviewer models, effort, focus, constraints, verification commands and limits, choosing from real model lists. It suggests plan files and check commands found in the repository, shows the equivalent command line, and asks before starting. Flags fill in their answers, and `-i` asks for whatever is left even when a plan or brief is given.
+- `crosscheck models [--json]` lists the models and effort levels each agent runtime accepts for your account.
+- `crosscheck doctor` reports both model lists and checks the Codex default model and effort in `config.toml`.
+
+### Changed
+
+- Models and effort levels are checked against the runtimes before a run starts, with spelling suggestions. A mistyped model is a usage error (exit 64), or a choice in a terminal, instead of an agent failure minutes into the run.
+- Without a model in `~/.codex/config.toml`, Codex uses your account's default model instead of the adapter's built-in one.
+
 ## [0.1.0] - 2026-10-26
 
 ### Added
@@ -19,5 +32,6 @@ All notable changes to this project are documented here. The format follows
 - `crosscheck doctor` preflight checks.
 - Standalone executables for Linux and macOS (x64, arm64) and a Homebrew tap.
 
-[Unreleased]: https://github.com/brielov/crosscheck/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/brielov/crosscheck/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/brielov/crosscheck/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/brielov/crosscheck/releases/tag/v0.1.0

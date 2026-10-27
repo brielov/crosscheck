@@ -6,6 +6,8 @@ import path from "node:path";
 import pkg from "../package.json";
 import { defaultCodexConfig } from "./agents/harness-backend.ts";
 import { spawnProcess } from "./agents/process.ts";
+import { checkAgent, defaultModel, loadCatalog } from "./models.ts";
+import type { Provider } from "./types.ts";
 
 // Preflight checks for a machine: everything crosscheck needs before it can
 // start the agents, without starting them or spending tokens.
@@ -154,19 +156,58 @@ async function checkCodexAuth(): Promise<DoctorCheck> {
   };
 }
 
+async function checkModels(provider: Provider): Promise<DoctorCheck> {
+  const name = `${provider} models`;
+  try {
+    const catalog = await loadCatalog(provider);
+    const visible = catalog.models.filter((m) => !m.hidden).length;
+    const fallback = defaultModel(catalog);
+    return {
+      name,
+      status: "ok",
+      detail: `${visible} available${fallback ? `, default ${fallback.id}` : ""} (\`crosscheck models\` lists them)`,
+    };
+  } catch (e) {
+    return {
+      name,
+      status: "warn",
+      detail: `could not list models: ${(e as Error).message}`,
+      hint: "Model names will be checked when the agent starts instead of before the run.",
+    };
+  }
+}
+
 async function checkCodexDefaults(): Promise<DoctorCheck> {
+  const name = "codex defaults";
   const d = await defaultCodexConfig();
+  const detail = d.model
+    ? `model ${d.model}${d.effort ? `, effort ${d.effort}` : ""} (from config.toml)`
+    : "no model in config.toml";
+  const catalog = await loadCatalog("codex").catch(() => undefined);
+  if (catalog) {
+    const problem = d.model ? checkAgent({ provider: "codex", ...d }, catalog).problem : undefined;
+    if (problem)
+      return {
+        name,
+        status: "fail",
+        detail: `${detail}: ${problem.message}`,
+        hint: "Fix `model` / `model_reasoning_effort` in ~/.codex/config.toml, or pass --reviewer codex:<model> and --effort.",
+      };
+    const fallback = defaultModel(catalog);
+    return {
+      name,
+      status: "ok",
+      detail: d.model
+        ? detail
+        : `${detail}; crosscheck uses your account default (${fallback?.id})`,
+    };
+  }
   return d.model
-    ? {
-        name: "codex defaults",
-        status: "ok",
-        detail: `model ${d.model}${d.effort ? `, effort ${d.effort}` : ""} (from config.toml)`,
-      }
+    ? { name, status: "ok", detail }
     : {
-        name: "codex defaults",
+        name,
         status: "warn",
-        detail:
-          "no model in config.toml; the adapter default (gpt-5.5) is not available on every plan",
+        detail: `${detail}; the adapter default (gpt-5.5) is not available on every plan`,
         hint: "Set `model` in ~/.codex/config.toml or pass --reviewer codex:<model>.",
       };
 }
@@ -196,6 +237,8 @@ export async function runDoctorChecks(): Promise<DoctorCheck[]> {
     checkCodexAuth(),
     checkCodexDefaults(),
     checkRuntimes(),
+    checkModels("claude-code"),
+    checkModels("codex"),
   ]);
 }
 

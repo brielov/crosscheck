@@ -12,7 +12,7 @@ import {
   searchTool,
   ToolDenied,
 } from "../src/agents/repo-tools.ts";
-import { parseAgent, parseCli, parseEffort, parseFocus } from "../src/cli.ts";
+import { parseAgent, parseCli, parseEffort, parseFocus } from "../src/options.ts";
 import { agentLabel } from "../src/orchestrator.ts";
 
 let repo: string;
@@ -261,6 +261,39 @@ describe("cli parsing", () => {
 
   test("no input means interactive", async () => {
     expect(await parseCli([])).toMatchObject({ interactive: true, config: null });
+    expect(await parseCli(["plan"])).toMatchObject({ interactive: true, config: null });
+  });
+
+  test("flags without a plan or brief preset the interactive setup", async () => {
+    const r = await parseCli([
+      "--repo",
+      repo,
+      "--effort",
+      "author=high",
+      "--reviewer",
+      "codex:gpt-6-luna",
+      "--rounds",
+      "2",
+    ]);
+    if (r === "help" || r === "version") throw new Error("unexpected");
+    expect(r.interactive).toBe(true);
+    expect(r.config).toBeNull();
+    expect(r.preset).toEqual({
+      repo,
+      reviewer: { provider: "codex", model: "gpt-6-luna" },
+      effort: { author: "high" },
+      maxRounds: 2,
+    });
+  });
+
+  test("--interactive keeps the given input and asks for the rest", async () => {
+    const r = await parseCli(["-i", "--brief", "Add API keys", "--repo", repo]);
+    if (r === "help" || r === "version") throw new Error("unexpected");
+    expect(r).toMatchObject({
+      interactive: true,
+      config: null,
+      preset: { input: { kind: "brief", brief: "Add API keys" } },
+    });
   });
 
   test("invalid or conflicting options never silently fall back to interactive defaults", async () => {
@@ -268,8 +301,9 @@ describe("cli parsing", () => {
       ["--brief", ""],
       ["--brief", "x", "--brief-file", "missing.md"],
       ["--brief", "x", "--constraints", "x", "--constraints-file", "missing.md"],
-      ["--repo", repo, "--effort", "high"],
-      ["plan"],
+      ["--repo", repo, "--effort", "extreme"],
+      ["--author", "gemini"],
+      ["--rounds", "0"],
       ["--brief", "x", "--rounds", ""],
       ["--brief", "x", "--timeout", "9999999999"],
       ["--brief", "x", "--focus", ""],
