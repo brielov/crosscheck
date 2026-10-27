@@ -662,13 +662,15 @@ export async function runReview(deps: RunDeps): Promise<RunState> {
       flushText("reviewer");
       await store.flush();
       await persist();
-      await store.writeText("report.md", renderReport(state, ledger.list()));
+      await store.writeText("report.md", renderReport(state, ledger.list(), store.dir));
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       finish("error", `could not save run artifacts: ${message}`);
       state.error = { message };
       await persist().catch(() => {});
-      await store.writeText("report.md", renderReport(state, ledger.list())).catch(() => {});
+      await store
+        .writeText("report.md", renderReport(state, ledger.list(), store.dir))
+        .catch(() => {});
     }
   }
   return state;

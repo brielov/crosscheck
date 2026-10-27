@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { stripCredentials, workingTreeSnapshot } from "../src/repo.ts";
+import { repoIdentity, stripCredentials, workingTreeSnapshot } from "../src/repo.ts";
 
 test("repository remote URLs do not persist passwords or query tokens", () => {
   expect(stripCredentials("https://user:password@example.com/repo.git?token=secret#secret")).toBe(
@@ -36,6 +36,18 @@ test("snapshots detect edits to existing untracked files and index changes witho
     await workingTreeSnapshot(repo);
     expect(await Bun.file(path.join(repo, "executed")).exists()).toBe(false);
     expect(await Bun.file(path.join(repo, "converted")).exists()).toBe(false);
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("a repository with no commits yet still reports its branch", async () => {
+  const repo = await mkdtemp(path.join(os.tmpdir(), "crosscheck-unborn-"));
+  try {
+    await Bun.$`git init -q -b trunk`.cwd(repo).quiet();
+    const id = await repoIdentity(repo);
+    expect(id.branch).toBe("trunk");
+    expect(id.head).toBeNull();
   } finally {
     await rm(repo, { recursive: true, force: true });
   }

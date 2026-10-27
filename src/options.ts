@@ -237,12 +237,15 @@ export function shellQuote(value: string): string {
   return /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
+/** A path relative to `cwd` when it lies inside it, else the absolute path. */
+export function relativePath(p: string, cwd = process.cwd()): string {
+  const r = path.relative(cwd, p);
+  return r && !r.startsWith("..") && !path.isAbsolute(r) ? r : p;
+}
+
 /** The flags that reproduce a configuration, for rerunning without the prompts. */
 export function toCommandLine(config: RunConfig, cwd = process.cwd()): string {
-  const rel = (p: string) => {
-    const r = path.relative(cwd, p);
-    return r && !r.startsWith("..") && !path.isAbsolute(r) ? r : p;
-  };
+  const rel = (p: string) => relativePath(p, cwd);
   const agent = (a: AgentConfig) => (a.model ? `${a.provider}:${a.model}` : a.provider);
   const args = ["crosscheck", "plan"];
   if (config.input.kind === "plan") args.push(rel(config.input.planPath));

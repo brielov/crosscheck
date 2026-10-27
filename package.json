@@ -1,6 +1,6 @@
 {
   "name": "crosscheck",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Have two coding agents review a plan against your actual repository: Claude Code writes, Codex reviews (or the other way round).",
   "keywords": [
     "cli",

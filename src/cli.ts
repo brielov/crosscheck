@@ -10,7 +10,7 @@ import { describeModels, listModels } from "./models.ts";
 import { DEFAULT_FOCUS, DEFAULTS, parseCli, UsageError } from "./options.ts";
 import { runReview, type RunState } from "./orchestrator.ts";
 import { bold, createProgress, cyan, dim, green, red, yellow } from "./progress.ts";
-import { formatDuration, formatUsage } from "./report.ts";
+import { formatDuration, formatUsage, nextSteps } from "./report.ts";
 import { resolveAgents, wizard } from "./setup.ts";
 import { RunStore } from "./store.ts";
 import {
@@ -101,6 +101,14 @@ function printSummary(state: RunState, findings: Finding[], dir: string) {
     lines.push(
       red("Warning: the repository working tree changed during the run; check git status."),
     );
+  const steps = nextSteps(state, findings, dir);
+  if (steps.length > 0) {
+    lines.push("", bold("Next steps:"));
+    steps.forEach((step, i) => {
+      lines.push(`  ${i + 1}. ${step.text}`);
+      if (step.command) lines.push(`       ${cyan(step.command)}`);
+    });
+  }
   lines.push("");
   process.stderr.write(`${lines.join("\n")}\n`);
   // Paths go to stdout so they are easy to capture.

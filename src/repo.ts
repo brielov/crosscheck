@@ -50,7 +50,8 @@ export async function repoIdentity(repo: string): Promise<RepoIdentity> {
     return { root, isGit: false, head: null, branch: null, remote: null, dirtyPaths: 0 };
   const [head, branch, remote, status] = await Promise.all([
     git(root, ["rev-parse", "HEAD"]),
-    git(root, ["rev-parse", "--abbrev-ref", "HEAD"]),
+    // symbolic-ref also names the branch of a repository with no commits yet.
+    git(root, ["symbolic-ref", "--short", "HEAD"]),
     git(root, ["remote", "get-url", "origin"]),
     git(root, [
       "status",

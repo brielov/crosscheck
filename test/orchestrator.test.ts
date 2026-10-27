@@ -3,6 +3,7 @@ import path from "node:path";
 import { AgentError } from "../src/agents/backend.ts";
 import type { Finding } from "../src/findings.ts";
 import { runReview, type RunState } from "../src/orchestrator.ts";
+import { nextSteps, type NextStep } from "../src/report.ts";
 import { RunStore } from "../src/store.ts";
 import type { RunConfig } from "../src/types.ts";
 import {
@@ -502,5 +503,63 @@ describe("budgets, cancellation and failures", () => {
     expect(await Bun.file(path.join(store.dir, "plan/v0.md")).text()).toBe("# Drafted plan\n");
     expect(await Bun.file(store.path("input/brief.md")).text()).toContain("Add API keys");
     expect(fake.prompts.reviewer[0]).toContain("# Drafted plan");
+  });
+});
+
+describe("next steps", () => {
+  const texts = (steps: NextStep[]) => steps.map((s) => `${s.text} ${s.command ?? ""}`).join("\n");
+
+  test("a complete review shows how to compare and adopt the revised plan", async () => {
+    const { state, findings, store, planPath } = await run({
+      reviewer: [
+        review({ new_findings: [finding()] }),
+        review({ verdicts: [verdict("F1", "verified")] }),
+      ],
+      author: [author({ responses: [response("F1", "accept")], revised_plan: REVISED })],
+    });
+    const steps = nextSteps(state, findings, store.dir, state.config.repo);
+    const plan = path.relative(state.config.repo, store.path("plan.md"));
+    const original = path.relative(state.config.repo, planPath);
+    expect(steps[0]!.command).toBe(`diff -u ${original} ${plan}`);
+    expect(steps[1]!.command).toBe(`cp ${plan} ${original}`);
+    const report = await Bun.file(store.path("report.md")).text();
+    expect(report).toContain("## Next steps");
+    expect(report).toContain(`cp ${plan} ${original}`);
+  });
+
+  test("an unchanged plan has nothing to adopt", async () => {
+    const { state, findings, store } = await run({ reviewer: [review({})], author: [] });
+    expect(state.status).toBe("review_complete");
+    const steps = texts(nextSteps(state, findings, store.dir, state.config.repo));
+    expect(steps).toContain("nothing to copy");
+    expect(steps).not.toContain("cp ");
+  });
+
+  test("open decisions become a rerun with constraints to fill in", async () => {
+    const { state, findings, store } = await run({
+      reviewer: [
+        review({ new_findings: [finding({ evidence_type: "missing_requirement" })] }),
+        review({ verdicts: [verdict("F1", "needs_user_decision")] }),
+      ],
+      author: [author({ responses: [response("F1", "needs_user_decision", "Per-org keys?")] })],
+    });
+    expect(state.status).toBe("needs_input");
+    const steps = nextSteps(state, findings, store.dir, state.config.repo);
+    expect(steps[0]!.text).toContain("Decide F1");
+    expect(steps[1]!.command).toContain("--constraints 'F1: <your decision>'");
+    expect(texts(steps)).not.toContain("cp ");
+  });
+
+  test("a failed run is rerun with the same settings", async () => {
+    const { state, findings, store, planPath } = await run({
+      reviewer: [review({ new_findings: [finding()] })],
+      author: [new AgentError("claude-code: Invalid API key", "run /login")],
+    });
+    const steps = nextSteps(state, findings, store.dir, state.config.repo);
+    expect(steps).toHaveLength(1);
+    expect(steps[0]!.text).toContain("described under Fix");
+    expect(steps[0]!.command).toStartWith(
+      `crosscheck plan ${path.relative(state.config.repo, planPath)}`,
+    );
   });
 });

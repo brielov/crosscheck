@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-27
+
+### Added
+
+- Every run ends with numbered next steps, in the terminal and at the top of `report.md`, based on how the run ended. A finished review shows the commands to compare the revised plan with yours and to adopt it. A run waiting on your decisions gives a rerun command with a place to fill them in. Unfinished, failed and cancelled runs get a command that resumes from the latest plan. It also flags untested assumptions and leftover low-severity suggestions.
+
+### Fixed
+
+- The report names the branch of a repository with no commits yet, instead of showing `? @ no commits`.
+
 ## [0.2.0] - 2026-10-26
 
 ### Added
@@ -32,6 +42,7 @@ All notable changes to this project are documented here. The format follows
 - `crosscheck doctor` preflight checks.
 - Standalone executables for Linux and macOS (x64, arm64) and a Homebrew tap.
 
-[Unreleased]: https://github.com/brielov/crosscheck/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/brielov/crosscheck/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/brielov/crosscheck/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/brielov/crosscheck/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/brielov/crosscheck/releases/tag/v0.1.0

@@ -24,6 +24,13 @@ $ crosscheck plan PLAN.md --focus architecture,correctness,testing \
   ✓ F3 verified
 
 Outcome: review_complete: no unresolved high/medium findings and the last review raised no new material issues
+
+Next steps:
+  1. Review what changed:
+       diff -u PLAN.md .crosscheck/runs/20261026-164111-5548/plan.md
+  2. If you agree, adopt the revised plan (crosscheck never edits your file):
+       cp .crosscheck/runs/20261026-164111-5548/plan.md PLAN.md
+
 Plan:       .crosscheck/runs/20261026-164111-5548/plan.md
 Report:     .crosscheck/runs/20261026-164111-5548/report.md
 ```

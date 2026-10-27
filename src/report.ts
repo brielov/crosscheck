@@ -1,4 +1,6 @@
+import path from "node:path";
 import { Ledger, type Finding } from "./findings.ts";
+import { relativePath, shellQuote, toCommandLine } from "./options.ts";
 import type { RunState } from "./orchestrator.ts";
 import { CLOSED_STATUSES, MATERIAL_SEVERITIES, type Usage } from "./types.ts";
 
@@ -33,7 +35,112 @@ function findingLine(f: Finding, extra?: string): string {
   return `- **${f.id}** [${f.severity} · ${f.category} · ${f.evidenceType.replace(/_/g, " ")}] ${one(f.title, 160)} — _${f.status}_${extra ? `\n  ${extra}` : ""}`;
 }
 
-export function renderReport(state: RunState, findings: Finding[]): string {
+export interface NextStep {
+  text: string;
+  command?: string;
+}
+
+const isUnresolved = (f: Finding) =>
+  MATERIAL_SEVERITIES.has(f.severity) && !CLOSED_STATUSES.has(f.status) && !Ledger.needsUser(f);
+
+const ids = (fs: Finding[]) => fs.map((f) => f.id).join(", ");
+
+/**
+ * What the user should do after a run, for the terminal summary and report.md.
+ * Commands are written to be run from `cwd`.
+ */
+export function nextSteps(
+  state: RunState,
+  findings: Finding[],
+  dir: string,
+  cwd = process.cwd(),
+): NextStep[] {
+  const q = (p: string) => shellQuote(relativePath(p, cwd));
+  const plan = path.join(dir, "plan.md");
+  const revised = (state.planVersions.at(-1)?.version ?? 0) > 0;
+  const original = state.config.input.kind === "plan" ? state.config.input.planPath : null;
+  // Later runs start from the newest plan so finished work is not redone.
+  const rerun = (constraints = state.config.constraints) =>
+    toCommandLine(
+      {
+        ...state.config,
+        constraints,
+        ...(revised || original
+          ? { input: { kind: "plan", planPath: revised ? plan : original! } }
+          : {}),
+      },
+      cwd,
+    );
+  const steps: NextStep[] = [];
+  const needsUser = findings.filter(Ledger.needsUser);
+  const unresolved = findings.filter(isUnresolved);
+
+  switch (state.status) {
+    case "error":
+      steps.push({
+        text: `Fix the problem${state.error?.hint ? " described under Fix" : " in the outcome above"}, then run again${revised ? " from the latest plan" : ""}:`,
+        command: rerun(),
+      });
+      break;
+    case "cancelled":
+    case "running":
+      steps.push({
+        text: `Pick up where it stopped${revised ? " (starting from the latest plan)" : ""}:`,
+        command: rerun(),
+      });
+      break;
+    default:
+      if (needsUser.length > 0) {
+        const decisions = needsUser.map((f) => `${f.id}: <your decision>`).join("; ");
+        steps.push(
+          {
+            text: `Decide ${ids(needsUser)}: the agents could not settle ${needsUser.length === 1 ? "it" : "them"} without you (see "Decisions needed from you" in report.md).`,
+          },
+          {
+            text: "Run again from the latest plan with your decisions as constraints:",
+            command: rerun([state.config.constraints, decisions].filter(Boolean).join(" ")),
+          },
+        );
+      } else if (unresolved.length > 0) {
+        steps.push({
+          text: `${ids(unresolved)} ${unresolved.length === 1 ? "is" : "are"} still open (see "Unresolved material findings" in report.md). Fix ${unresolved.length === 1 ? "it" : "them"} in the plan yourself, or let the agents continue${state.status === "budget_exhausted" ? " with more rounds or time (--rounds, --timeout)" : ""}:`,
+          command: rerun(),
+        });
+      }
+      if (state.status !== "review_complete") break;
+      if (revised && original) {
+        steps.push(
+          { text: "Review what changed:", command: `diff -u ${q(original)} ${q(plan)}` },
+          {
+            text: "If you agree, adopt the revised plan (crosscheck never edits your file):",
+            command: `cp ${q(plan)} ${q(original)}`,
+          },
+        );
+      } else if (revised) {
+        steps.push({
+          text: "Read the drafted plan and save it where you keep plans, for example:",
+          command: `cp ${q(plan)} PLAN.md`,
+        });
+      } else {
+        steps.push({ text: "Your plan passed review unchanged; there is nothing to copy." });
+      }
+  }
+
+  if (state.status !== "error" && state.status !== "cancelled" && state.status !== "running") {
+    if (state.assumptions.length > 0)
+      steps.push({
+        text: `The agents relied on ${state.assumptions.length} untested assumption(s), listed under "Verification and evidence" in report.md. Turn the risky ones into spikes or tests before building on them.${state.config.checks.length === 0 ? " Next time, --check '<command>' lets agents run your tests." : ""}`,
+      });
+    const lows = findings.filter((f) => f.severity === "low" && !CLOSED_STATUSES.has(f.status));
+    if (lows.length > 0)
+      steps.push({
+        text: `${lows.length} optional low-severity suggestion(s) are in report.md.`,
+      });
+  }
+  return steps;
+}
+
+export function renderReport(state: RunState, findings: Finding[], dir: string): string {
   const out: string[] = [];
   const latest = state.planVersions.at(-1);
   out.push(`# crosscheck report: ${OUTCOME_TEXT[state.status]}`, "");
@@ -42,11 +149,21 @@ export function renderReport(state: RunState, findings: Finding[]): string {
   out.push(
     `- Run: \`${state.id}\` · started ${state.startedAt} · elapsed ${formatDuration(state.elapsedMs)}`,
     `- Rounds: ${state.round} of max ${state.config.maxRounds} (a round = reviewer pass → author response/revision → reviewer verification)`,
-    `- Repository: \`${state.repo?.root ?? state.config.repo}\`${state.repo?.isGit ? ` · ${state.repo.branch ?? "?"} @ ${state.repo.head?.slice(0, 12) ?? "no commits"}${state.repo.dirtyPaths ? ` · ${state.repo.dirtyPaths} uncommitted path(s) at start` : ""}` : " · not a git repository"}`,
+    `- Repository: \`${state.repo?.root ?? state.config.repo}\`${state.repo?.isGit ? ` · ${state.repo.branch ?? "detached HEAD"} ${state.repo.head ? `@ ${state.repo.head.slice(0, 12)}` : "(no commits yet)"}${state.repo.dirtyPaths ? ` · ${state.repo.dirtyPaths} uncommitted path(s) at start` : ""}` : " · not a git repository"}`,
     `- Author: ${state.agents.author} · Reviewer: ${state.agents.reviewer}`,
     `- Focus: ${state.config.focus.join(", ")}`,
     "",
   );
+
+  const steps = nextSteps(state, findings, dir, state.config.repo);
+  if (steps.length > 0) {
+    out.push("## Next steps", "", "Commands run from the repository root.", "");
+    steps.forEach((step, i) => {
+      out.push(`${i + 1}. ${step.text}`);
+      if (step.command) out.push("", "   ```sh", `   ${step.command}`, "   ```");
+    });
+    out.push("");
+  }
 
   out.push("## Files", "");
   if (latest)
@@ -86,10 +203,7 @@ export function renderReport(state: RunState, findings: Finding[]): string {
     out.push("");
   }
 
-  const unresolved = findings.filter(
-    (f) =>
-      MATERIAL_SEVERITIES.has(f.severity) && !CLOSED_STATUSES.has(f.status) && !Ledger.needsUser(f),
-  );
+  const unresolved = findings.filter(isUnresolved);
   if (unresolved.length > 0) {
     out.push("## Unresolved material findings", "");
     for (const f of unresolved)
