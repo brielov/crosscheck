@@ -1,14 +1,23 @@
 #!/usr/bin/env bun
 import { appendFileSync } from "node:fs";
 import path from "node:path";
+import { parseArgs } from "node:util";
 import { createHarnessBackend } from "./agents/harness-backend.ts";
 import { createRepoTools } from "./agents/repo-tools.ts";
 import { doctor } from "./doctor.ts";
 import pkg from "../package.json";
 import { Ledger, type Finding } from "./findings.ts";
 import { describeModels, listModels } from "./models.ts";
-import { DEFAULT_FOCUS, DEFAULTS, parseCli, UsageError } from "./options.ts";
-import { runReview, type RunState } from "./orchestrator.ts";
+import {
+  DEFAULT_FOCUS,
+  DEFAULTS,
+  MAX_TIMEOUT_MINUTES,
+  parseCli,
+  positiveInt,
+  UsageError,
+} from "./options.ts";
+import { runReview, type ResumeFrom, type RunState } from "./orchestrator.ts";
+import { prepareResume } from "./resume.ts";
 import { bold, createProgress, cyan, dim, green, red, yellow } from "./progress.ts";
 import { formatDuration, formatUsage, nextSteps } from "./report.ts";
 import { resolveAgents, wizard } from "./setup.ts";
@@ -38,6 +47,8 @@ Usage:
   crosscheck [options]               Guided setup: prompts for anything the flags leave out
   crosscheck plan <PLAN.md> [options]
   crosscheck plan --brief "<text>" [options]
+  crosscheck resume <run> [--rounds <n>] [--timeout <minutes>]
+                                     Continue a run that stopped early, keeping its points
   crosscheck models [--json]         List the models each agent runtime offers you
   crosscheck doctor [--json]         Check this machine's setup (no agents started)
 
@@ -181,6 +192,7 @@ async function models(argv: string[]): Promise<number> {
 async function main(argv: string[]): Promise<number> {
   if (argv[0] === "doctor") return doctor(argv.slice(1));
   if (argv[0] === "models") return models(argv.slice(1));
+  if (argv[0] === "resume") return resume(argv.slice(1));
   const terminal = process.stdin.isTTY === true && process.stdout.isTTY === true;
   let config: RunConfig | null;
   let verbose: boolean;
@@ -217,12 +229,61 @@ async function main(argv: string[]): Promise<number> {
     process.stderr.write(`crosscheck: cannot create run directory: ${(e as Error).message}\n`);
     return 1;
   }
+  return execute(config, store, verbose);
+}
+
+async function resume(argv: string[]): Promise<number> {
+  let prepared: Awaited<ReturnType<typeof prepareResume>>;
+  let verbose: boolean;
+  try {
+    const { values, positionals } = parseArgs({
+      args: argv,
+      allowPositionals: true,
+      options: {
+        rounds: { type: "string" },
+        timeout: { type: "string" },
+        verbose: { type: "boolean" },
+        help: { type: "boolean", short: "h" },
+      },
+    });
+    if (values.help) return (process.stdout.write(`${HELP}\n`), 0);
+    if (positionals.length !== 1)
+      throw new UsageError("resume: give one run directory or run id (try --help)");
+    verbose = values.verbose ?? false;
+    prepared = await prepareResume(positionals[0]!, {
+      ...(values.rounds !== undefined ? { rounds: positiveInt(values.rounds, "--rounds") } : {}),
+      ...(values.timeout !== undefined
+        ? { timeoutMinutes: positiveInt(values.timeout, "--timeout", MAX_TIMEOUT_MINUTES) }
+        : {}),
+    });
+  } catch (e) {
+    if (
+      !(e instanceof UsageError) &&
+      (e as { code?: string }).code !== "ERR_PARSE_ARGS_UNKNOWN_OPTION"
+    )
+      throw e;
+    process.stderr.write(`crosscheck: ${(e as Error).message}\n`);
+    return 64;
+  }
+  const { dir, config, from } = prepared;
+  return execute(config, await RunStore.open(dir), verbose, from);
+}
+
+/** Runs the review in `store` with progress output, then prints the summary. */
+async function execute(
+  config: RunConfig,
+  store: RunStore,
+  verbose: boolean,
+  from?: ResumeFrom,
+): Promise<number> {
   const progress = createProgress({ verbose, maxRounds: config.maxRounds });
   captureHarnessLogs(
     store.path("harness.log"),
     verbose ? (line) => progress.log(dim(`  ${line}`)) : undefined,
   );
-  progress.log(`${cyan("crosscheck")} run ${store.id} ${dim(store.dir)}`);
+  progress.log(
+    `${cyan("crosscheck")} ${from ? `resuming run ${store.id} at round ${from.state.round + 1}` : `run ${store.id}`} ${dim(store.dir)}`,
+  );
   progress.log(dim(`transcript: tail -f ${path.join(store.dir, "transcript.jsonl")}`));
 
   const controller = new AbortController();
@@ -246,6 +307,7 @@ async function main(argv: string[]): Promise<number> {
   const state = await runReview({
     config,
     store,
+    ...(from ? { resume: from } : {}),
     signal: controller.signal,
     onEvent: (e) => progress.handle(e),
     createBackend: ({ onCheck }) =>

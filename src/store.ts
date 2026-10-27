@@ -26,6 +26,13 @@ export class RunStore {
     return new RunStore(id, dir);
   }
 
+  /** An existing run directory, for resuming it. */
+  static async open(dir: string): Promise<RunStore> {
+    await appendFile(path.join(dir, "events.jsonl"), "");
+    await appendFile(path.join(dir, "transcript.jsonl"), "");
+    return new RunStore(path.basename(dir), dir);
+  }
+
   path(...parts: string[]): string {
     return path.join(this.dir, ...parts);
   }

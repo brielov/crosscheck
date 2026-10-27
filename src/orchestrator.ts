@@ -98,6 +98,19 @@ export interface RunState {
   error: { message: string; hint?: string } | null;
   /** Whether the repository working tree changed during the run (null outside git). */
   repoModified: boolean | null;
+  /**
+   * Whether the latest full review raised nothing material and nothing material
+   * was raised since. Missing in runs saved before 0.3.3, which read as false.
+   */
+  cleanReview?: boolean;
+  /** Each time the run was resumed, and how it had stopped. */
+  resumes?: { at: string; status: RunState["status"]; reason: string }[];
+}
+
+/** A stopped run to continue: its saved state and points. */
+export interface ResumeFrom {
+  state: RunState;
+  findings: Finding[];
 }
 
 export interface RunDeps {
@@ -110,6 +123,8 @@ export interface RunDeps {
   /** User cancellation (Ctrl-C). */
   signal?: AbortSignal;
   onEvent?: (event: RunEvent) => void;
+  /** Continue this run instead of starting a new one. `config` carries the new limits. */
+  resume?: ResumeFrom;
 }
 
 class ValidationError extends Error {}
@@ -167,36 +182,55 @@ function describeTool(call: ToolCallRecord): string {
 
 export async function runReview(deps: RunDeps): Promise<RunState> {
   const { config, store } = deps;
-  const started = Date.now();
+  const prior = deps.resume?.state;
+  // Elapsed time accumulates across resumes; the time limit applies to this session.
+  const started = Date.now() - (prior?.elapsedMs ?? 0);
   const timeout = AbortSignal.timeout(config.timeoutMs);
   const signal = AbortSignal.any(deps.signal ? [deps.signal, timeout] : [timeout]);
-  const ledger = new Ledger();
+  const ledger = new Ledger(deps.resume?.findings ?? []);
   const emit = (e: RunEvent) => deps.onEvent?.(e);
   const labels: Record<Role, string> = {
     author: agentLabel("author", config),
     reviewer: agentLabel("reviewer", config),
   };
 
-  const state: RunState = {
-    id: store.id,
-    status: "running",
-    reason: "",
-    startedAt: new Date(started).toISOString(),
-    endedAt: null,
-    elapsedMs: 0,
-    round: 0,
-    config,
-    repo: null,
-    agents: labels,
-    planVersions: [],
-    rounds: [],
-    usage: { author: { turns: 0 }, reviewer: { turns: 0 } },
-    checks: [],
-    assumptions: [],
-    examined: { author: [], reviewer: [] },
-    error: null,
-    repoModified: null,
-  };
+  const state: RunState = prior
+    ? {
+        ...prior,
+        status: "running",
+        reason: "",
+        endedAt: null,
+        config,
+        agents: labels,
+        error: null,
+        repoModified: null,
+        cleanReview: prior.cleanReview ?? false,
+        resumes: [
+          ...(prior.resumes ?? []),
+          { at: new Date().toISOString(), status: prior.status, reason: prior.reason },
+        ],
+      }
+    : {
+        id: store.id,
+        status: "running",
+        reason: "",
+        startedAt: new Date(started).toISOString(),
+        endedAt: null,
+        elapsedMs: 0,
+        round: 0,
+        config,
+        repo: null,
+        agents: labels,
+        planVersions: [],
+        rounds: [],
+        usage: { author: { turns: 0 }, reviewer: { turns: 0 } },
+        checks: [],
+        assumptions: [],
+        examined: { author: [], reviewer: [] },
+        error: null,
+        repoModified: null,
+        cleanReview: false,
+      };
 
   let activeRole: Role | null = null;
   const persist = async () => {
@@ -645,11 +679,9 @@ export async function runReview(deps: RunDeps): Promise<RunState> {
     state.reason = reason;
   };
 
-  let before: string | null = null;
-  try {
-    backend = deps.createBackend(backendHooks);
+  /** A new run: record the inputs and the first plan version. */
+  async function start() {
     state.repo = await repoIdentity(config.repo);
-    before = await workingTreeSnapshot(config.repo);
     await store.writeJson("input/config.json", config);
     if (config.input.kind === "brief")
       await store.writeText("input/brief.md", `${config.input.brief}\n`);
@@ -673,39 +705,61 @@ export async function runReview(deps: RunDeps): Promise<RunState> {
       recordAssumptions("author", out.assumptions);
       await savePlan(out.revised_plan!, labels.author, out.summary);
     }
+  }
+
+  /** A resumed run: reload every saved plan version. */
+  async function resumePlans() {
+    for (const v of state.planVersions) {
+      const file = Bun.file(store.path("plan", `v${v.version}.md`));
+      if (!(await file.exists())) throw new Error(`plan/v${v.version}.md is missing from the run`);
+      planTexts[v.version] = await file.text();
+    }
+    version = state.planVersions.at(-1)?.version ?? 0;
+    plan = planTexts[version] ?? "";
+    if (!plan.trim()) throw new Error("the run has no saved plan to resume from");
+  }
+
+  let before: string | null = null;
+  try {
+    backend = deps.createBackend(backendHooks);
+    before = await workingTreeSnapshot(config.repo);
+    if (prior) {
+      await resumePlans();
+      await store.append("events.jsonl", {
+        type: "resume",
+        round: state.round,
+        from: prior.status,
+      });
+    } else await start();
     await persist();
+
+    // A run that stopped mid-round may have answers waiting for the reviewer.
+    // Check them first, as the rest of that round would have.
+    let freshAuthor = prior != null;
+    if (ledger.awaiting("reviewer").length > 0) {
+      const last = state.planVersions.at(-1)!;
+      const revisedThisRound = last.round === state.round && last.version > 0;
+      const material = await verifyPass({
+        fromVersion: revisedThisRound ? last.version - 1 : version,
+        summary:
+          roundLog(state.round).authorSummary ?? "(the author's turn before the run stopped)",
+      });
+      if (material > 0) state.cleanReview = false;
+    }
 
     // A round starts with a full review in fresh sessions whenever no point is
     // still being discussed; otherwise it continues the discussion. Either way
     // the author takes a turn and the reviewer checks it.
-    let cleanReview = false;
     let unchangedRounds = 0;
     for (;;) {
-      signal.throwIfAborted();
-      state.round += 1;
-      const full = ledger.pending().length === 0;
-      roundLog(state.round).full = full;
-      const fingerprint = `${Bun.hash(plan)}|${ledger.fingerprint()}`;
-      let material = 0;
-      if (full) {
-        await resetSession("reviewer");
-        await resetSession("author");
-        material += await fullReview();
-      }
-      const turn = await authorPass(full);
-      material += turn.newMaterial;
-      if (ledger.awaiting("reviewer").length > 0 || turn.fromVersion !== version)
-        material += await verifyPass(turn);
-      if (full) cleanReview = material === 0;
-      else if (material > 0) cleanReview = false;
-
-      const decision = evaluate(ledger, { cleanReview, failedChecks: failedChecks() });
+      const decision = evaluate(ledger, {
+        cleanReview: state.cleanReview ?? false,
+        failedChecks: failedChecks(),
+      });
       if (decision) {
         finish(decision.outcome, decision.reason);
         break;
       }
-      unchangedRounds =
-        `${Bun.hash(plan)}|${ledger.fingerprint()}` === fingerprint ? unchangedRounds + 1 : 0;
       if (unchangedRounds >= STALL_ROUNDS) {
         finish(
           "stalled",
@@ -723,6 +777,27 @@ export async function runReview(deps: RunDeps): Promise<RunState> {
         );
         break;
       }
+      signal.throwIfAborted();
+      state.round += 1;
+      const full = ledger.pending().length === 0;
+      roundLog(state.round).full = full;
+      const fingerprint = `${Bun.hash(plan)}|${ledger.fingerprint()}`;
+      let material = 0;
+      if (full) {
+        await resetSession("reviewer");
+        await resetSession("author");
+        material += await fullReview();
+      }
+      const turn = await authorPass(full || freshAuthor);
+      freshAuthor = false;
+      material += turn.newMaterial;
+      if (ledger.awaiting("reviewer").length > 0 || turn.fromVersion !== version)
+        material += await verifyPass(turn);
+      if (full) state.cleanReview = material === 0;
+      else if (material > 0) state.cleanReview = false;
+      unchangedRounds =
+        `${Bun.hash(plan)}|${ledger.fingerprint()}` === fingerprint ? unchangedRounds + 1 : 0;
+      await persist();
     }
   } catch (e) {
     if (deps.signal?.aborted) {

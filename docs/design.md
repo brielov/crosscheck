@@ -18,6 +18,8 @@ The CLI owns the outer workflow. Each agent's harness owns its internal reasonin
 
 **Separate conversations.** Each agent has its own harness session. Sessions last until the next full review, which starts both agents fresh so neither grades its own earlier work from memory. crosscheck passes only the current plan, a diff, the relevant points and answers, and evidence between them; it never forwards transcripts. Peer feedback is labelled as coming from another agent, and it cannot change the user's requirements, permissions or limits. Both agents are told never to agree just to finish and never to invent objections.
 
+**Resuming.** `crosscheck resume` reloads a stopped run's state, points and plan versions and continues in the same directory. Both agents start fresh sessions; the points carry the discussion. If the run stopped after the author's turn but before the reviewer's check, that check runs first, in the same round. Whether the last full review was clean is saved with the run, so a resumed run still needs a clean full review before it can complete. Elapsed time adds up across resumes, while the time limit applies to each session.
+
 **Effort balance.** When one agent's reasoning effort is two or more levels below the other's, crosscheck warns before the run starts. In practice a much weaker author accepts whatever the reviewer says.
 
 ## Points ledger

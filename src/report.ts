@@ -85,6 +85,9 @@ export function nextSteps(
       },
       cwd,
     );
+  // A run with a plan continues where it stopped, keeping its points.
+  const canResume = state.planVersions.length > 0;
+  const resume = (extra = "") => `crosscheck resume ${q(dir)}${extra}`;
   const steps: NextStep[] = [];
   const needsUser = findings.filter(Ledger.needsUser);
   const unresolved = findings.filter(isUnresolved);
@@ -92,15 +95,15 @@ export function nextSteps(
   switch (state.status) {
     case "error":
       steps.push({
-        text: `Fix the problem${state.error?.hint ? " described under Fix" : " in the outcome above"}, then run again${revised ? " from the latest plan" : ""}:`,
-        command: rerun(),
+        text: `Fix the problem${state.error?.hint ? " described under Fix" : " in the outcome above"}, then ${canResume ? "resume the run where it stopped" : "run again"}:`,
+        command: canResume ? resume() : rerun(),
       });
       break;
     case "cancelled":
     case "running":
       steps.push({
-        text: `Pick up where it stopped${revised ? " (starting from the latest plan)" : ""}:`,
-        command: rerun(),
+        text: "Resume the run where it stopped:",
+        command: canResume ? resume() : rerun(),
       });
       break;
     default:
@@ -117,8 +120,13 @@ export function nextSteps(
         );
       } else if (unresolved.length > 0) {
         steps.push({
-          text: `${ids(unresolved)} ${unresolved.length === 1 ? "is" : "are"} still under discussion (see "Points still under discussion" in report.md). Fix ${unresolved.length === 1 ? "it" : "them"} in the plan yourself, or let the agents continue${state.status === "budget_exhausted" ? " with more rounds or time (--rounds, --timeout)" : ""}:`,
-          command: rerun(),
+          text: `${ids(unresolved)} ${unresolved.length === 1 ? "is" : "are"} still under discussion (see "Points still under discussion" in report.md). Fix ${unresolved.length === 1 ? "it" : "them"} in the plan yourself, or let the agents continue${state.status === "budget_exhausted" ? " (--rounds and --timeout set the new limits)" : ""}:`,
+          command: resume(),
+        });
+      } else if (state.status === "budget_exhausted" || state.status === "stalled") {
+        steps.push({
+          text: "Every point is settled, but no full review has come back clean since the last material change. Let the agents finish:",
+          command: resume(),
         });
       }
       if (state.status !== "review_complete") break;
@@ -159,6 +167,11 @@ export function renderReport(state: RunState, findings: Finding[], dir: string):
     `- Run: \`${state.id}\` · started ${state.startedAt} · elapsed ${formatDuration(state.elapsedMs)}`,
     `- Rounds: ${state.round} of max ${state.config.maxRounds} (${state.rounds.filter((r) => r.full).length} began with a full review; a round = full review when nothing is under discussion → author's turn → reviewer's check)`,
     `- Repository: \`${state.repo?.root ?? state.config.repo}\`${state.repo?.isGit ? ` · ${state.repo.branch ?? "detached HEAD"} ${state.repo.head ? `@ ${state.repo.head.slice(0, 12)}` : "(no commits yet)"}${state.repo.dirtyPaths ? ` · ${state.repo.dirtyPaths} uncommitted path(s) at start` : ""}` : " · not a git repository"}`,
+    ...(state.resumes?.length
+      ? [
+          `- Resumed ${state.resumes.length} time(s): ${state.resumes.map((r) => `after \`${r.status}\` at ${r.at}`).join("; ")}`,
+        ]
+      : []),
     `- Author: ${state.agents.author} · Reviewer: ${state.agents.reviewer}`,
     `- Focus: ${state.config.focus.join(", ")}`,
     "",

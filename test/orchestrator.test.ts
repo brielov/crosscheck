@@ -628,16 +628,16 @@ describe("next steps", () => {
     expect(texts(steps)).not.toContain("cp ");
   });
 
-  test("a failed run is rerun with the same settings", async () => {
-    const { state, findings, store, planPath } = await run({
+  test("a failed run is resumed where it stopped", async () => {
+    const { state, findings, store } = await run({
       reviewer: [review({ new_findings: [finding()] })],
       author: [new AgentError("claude-code: Invalid API key", "run /login")],
     });
     const steps = nextSteps(state, findings, store.dir, state.config.repo);
     expect(steps).toHaveLength(1);
     expect(steps[0]!.text).toContain("described under Fix");
-    expect(steps[0]!.command).toStartWith(
-      `crosscheck plan ${path.relative(state.config.repo, planPath)}`,
+    expect(steps[0]!.command).toBe(
+      `crosscheck resume ${path.relative(state.config.repo, store.dir)}`,
     );
   });
 });

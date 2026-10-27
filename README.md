@@ -151,6 +151,17 @@ A round starts with a full review in fresh sessions when nothing is under discus
 
 Agreement alone isn't proof: the report also lists checks that were skipped and assumptions the agents couldn't verify.
 
+### Resuming a run
+
+A run that stopped early can continue where it left off, with its points, plan versions and transcript intact:
+
+```sh
+crosscheck resume 20261027-140959-005a              # a run id from .crosscheck/runs
+crosscheck resume .crosscheck/runs/20261027-140959-005a --rounds 4 --timeout 90
+```
+
+This works after `error`, `cancelled`, `budget_exhausted` or `stalled`, and after a crash. Both agents start fresh sessions and get the discussion so far from the points. If the run stopped in the middle of a round, it finishes that round first. `--rounds` sets how many more rounds to allow: by default the rounds the run had left, or 8 if it used them all. `--timeout` sets the time limit for the resumed session, by default the run's original limit. A run waiting for your decisions (`needs_input`) isn't resumed: run again from its plan with your decisions in `--constraints`, as its next steps show.
+
 ### What you get
 
 Each run writes to `<repo>/.crosscheck/runs/<run-id>/`. That directory ignores itself, so it never shows up in `git status`.

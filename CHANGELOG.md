@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-10-27
+
+### Added
+
+- `crosscheck resume <run>` continues a run that stopped early (`error`, `cancelled`, `budget_exhausted`, `stalled`, or a crash) in the same run directory, keeping its points, plan versions and transcript. A run that stopped mid-round finishes that round first. `--rounds` and `--timeout` set the new limits. Next steps now suggest it instead of starting over.
+
 ## [0.3.2] - 2026-10-27
 
 ### Fixed
@@ -69,7 +75,8 @@ All notable changes to this project are documented here. The format follows
 - `crosscheck doctor` preflight checks.
 - Standalone executables for Linux and macOS (x64, arm64) and a Homebrew tap.
 
-[Unreleased]: https://github.com/brielov/crosscheck/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/brielov/crosscheck/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/brielov/crosscheck/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/brielov/crosscheck/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/brielov/crosscheck/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/brielov/crosscheck/compare/v0.2.1...v0.3.0
