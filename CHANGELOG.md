@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-27
+
+### Fixed
+
+- On macOS, a verification command could fail with `EPERM` while crosscheck cleaned up its leftover processes, because macOS reports `EPERM` instead of `ESRCH` when only a zombie is left.
+
 ## [0.3.0] - 2026-10-27
 
 ### Changed
@@ -54,7 +60,8 @@ All notable changes to this project are documented here. The format follows
 - `crosscheck doctor` preflight checks.
 - Standalone executables for Linux and macOS (x64, arm64) and a Homebrew tap.
 
-[Unreleased]: https://github.com/brielov/crosscheck/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/brielov/crosscheck/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/brielov/crosscheck/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/brielov/crosscheck/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/brielov/crosscheck/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/brielov/crosscheck/compare/v0.1.0...v0.2.0

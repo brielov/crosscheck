@@ -18,7 +18,10 @@ export function spawnProcess(
     try {
       process.kill(-proc.pid, signal);
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "ESRCH") throw e;
+      // ESRCH: the group is gone. macOS reports EPERM when only a zombie
+      // leader remains, so there is nothing left to signal either way.
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== "ESRCH" && code !== "EPERM") throw e;
     }
   };
   const stop = () => {
